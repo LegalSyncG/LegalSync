@@ -12,3 +12,4 @@ class Config:
     MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # Max 50 MB uploads
 
     CORS_HEADERS = 'Content-Type'
+#ola test
