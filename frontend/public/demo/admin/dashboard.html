@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Dashboard</title>
+    <link rel="stylesheet" href="../shared/styles.css">
+    <link rel="stylesheet" href="admin.css">
+</head>
+  
+<body>
+  <div class="admin-header">
+    <h1>LegalSync</h1>
+    <div>
+      <button id="addCaseBtn" class="comments-btn">Add Case</button>
+    <button id="logoutBtn" class="logout-btn">Logout</button>
+    </div>
+  </div>
+
+  <div class="admin-dashboard">
+    <aside class="sidebar">
+      <nav>
+        <ul>
+          <li class="active"><a href="dashboard.html">My Transcripts</a></li>
+        </ul>
+      </nav>
+    </aside>
+
+    <main class="content">
+      <div id="transcriptPreview" class="transcript-preview" style="display: none;">
+  <h3>Transcript Preview</h3>
+
+
+  <pre id="transcriptText"
+       style="max-height: 300px; overflow-y: auto; white-space: pre-wrap; background: #f9f9f9; padding: 10px; border: 1px solid #ccc;">
+    Transcript text will appear here...
+  </pre>
+
+  <audio id="transcriptAudio" controls style="width: 100%; margin-top: 10px;">
+    <source id="audioSource" src="" type="audio/mpeg">
+    Your browser does not support the audio element.
+  </audio>
+  <div id="alignStatus" class="align-status" aria-live="polite" style="margin-top:10px;">
+    <div class="progress">
+      <div class="progress-bar" id="alignProgress" style="width:0%"></div>
+    </div>
+    <div id="alignLabel" class="align-label">Waiting…</div>
+  </div>
+</div>
+
+
+
+      <div class="transcript-list">
+        <h2>Recent Transcripts</h2>
+        <div class="loading-spinner" id="loadingSpinner"></div>
+        <div id="transcriptItems"></div>
+      </div>
+    </main>
+  </div>
+
+  <script type="module" src="dashboard.js"></script>
+
+  <!-- Add Case Modal -->
+  <div id="addCaseModal" class="modal" style="display:none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Create New Case</h3>
+        <button id="closeAddCase" class="modal-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <label for="caseName">Case Name</label>
+        <input id="caseName" type="text" maxlength="70" placeholder="e.g., Interview 2024-09-01" />
+
+        <label>Audio (MP3)</label>
+        <div class="file-picker">
+          <input id="caseAudio" type="file" accept="audio/mpeg" hidden />
+          <button type="button" id="pickAudio" class="view-btn light">Choose file</button>
+          <span id="audioFileName" class="file-name">No file chosen</span>
+        </div>
+
+        <label>Transcript (TXT) — or paste below</label>
+        <div class="file-picker">
+          <input id="caseTranscriptFile" type="file" accept="text/plain" hidden />
+          <button type="button" id="pickTranscript" class="view-btn light">Choose file</button>
+          <span id="transcriptFileName" class="file-name">No file chosen</span>
+        </div>
+
+        <label for="caseTranscriptText">Transcript Text</label>
+        <textarea id="caseTranscriptText" rows="6" placeholder="Paste transcript without timestamps..."></textarea>
+      </div>
+      <div class="modal-footer">
+        <button id="submitAddCase" class="view-btn">Upload</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delete Case Confirmation -->
+  <div id="deleteCaseModal" class="modal" style="display:none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Delete Case</h3>
+        <button id="closeDeleteCase" class="modal-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <p>
+          Are you sure you want to delete this case?
+          This will permanently remove all associated files and comments.
+        </p>
+      </div>
+      <div class="modal-footer">
+        <button id="confirmDeleteCase" class="view-btn" style="background:#d82727">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Rename Case Modal -->
+  <div id="renameCaseModal" class="modal" style="display:none;">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Rename Case</h3>
+        <button id="closeRenameCase" class="modal-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <label for="renameCaseInput">New Name</label>
+        <input id="renameCaseInput" type="text" maxlength="70" placeholder="Enter new case name" />
+      </div>
+      <div class="modal-footer">
+        <button id="saveRenameCase" class="view-btn">Save</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
