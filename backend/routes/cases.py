@@ -15,7 +15,9 @@ from services.alignment import (
     _run_ffmpeg_to_wav,
     normalize_for_alignment,
     align_in_chunks,
+    build_mapped_parts,
 )
+from services.whisper_asr import transcribe_with_whisper
 
 
 cases_bp = Blueprint("cases", __name__)
@@ -63,34 +65,75 @@ def _align_job(user_id: int, case_id: int, gentle_url: str) -> None:
         with open(norm_path, "w", encoding="utf-8") as nf:
             nf.write(normalized_text)
 
-        # Splitting stage
-        _write_status(case_dir, "splitting")
+        # Choose backend: Whisper (local) or Gentle (HTTP)
+        backend = os.getenv("ASR_BACKEND", "gentle").lower()
+        if backend == "whisper":
+            _write_status(case_dir, "aligning")
+            use_chunking = (os.getenv("WHISPER_CHUNKING", "false").lower() in {"1","true","yes"})
+            if use_chunking:
+                chunks_dir = os.path.join(case_dir, "chunks")
+                def status_cb(phase: str, completed: int, total: int):
+                    _write_status(case_dir, phase, progress=None)
+                    path = _status_path(case_dir)
+                    try:
+                        data = {"status": phase, "total_chunks": total, "completed_chunks": completed}
+                        write_json(path, data)
+                    except Exception:
+                        pass
+                from services.whisper_asr import transcribe_with_whisper_chunked
+                result = transcribe_with_whisper_chunked(
+                    wav_path=wav_path,
+                    work_dir=chunks_dir,
+                    status_cb=status_cb,
+                    model_size=os.getenv("WHISPER_MODEL"),
+                    device=os.getenv("WHISPER_DEVICE"),
+                    compute_type=os.getenv("WHISPER_COMPUTE"),
+                    language=os.getenv("WHISPER_LANGUAGE"),
+                )
+            else:
+                result = transcribe_with_whisper(
+                    wav_path=wav_path,
+                    model_size=os.getenv("WHISPER_MODEL"),
+                    device=os.getenv("WHISPER_DEVICE"),
+                    compute_type=os.getenv("WHISPER_COMPUTE"),
+                    language=os.getenv("WHISPER_LANGUAGE"),
+                )
+        else:
+            # Splitting stage (Gentle)
+            _write_status(case_dir, "splitting")
 
-        # Align in chunks with live status updates
-        chunks_dir = os.path.join(case_dir, "chunks")
+            # Align in chunks with live status updates
+            chunks_dir = os.path.join(case_dir, "chunks")
 
-        def status_cb(phase: str, completed: int, total: int):
-            _write_status(case_dir, phase, progress=None)
-            # Persist counts for frontend progress
-            path = _status_path(case_dir)
-            try:
-                data = {"status": phase, "total_chunks": total, "completed_chunks": completed}
-                write_json(path, data)
-            except Exception:
-                pass
+            def status_cb(phase: str, completed: int, total: int):
+                _write_status(case_dir, phase, progress=None)
+                # Persist counts for frontend progress
+                path = _status_path(case_dir)
+                try:
+                    data = {"status": phase, "total_chunks": total, "completed_chunks": completed}
+                    write_json(path, data)
+                except Exception:
+                    pass
 
-        result = align_in_chunks(
-            wav_path=wav_path,
-            normalized_text=normalized_text,
-            gentle_url=gentle_url,
-            work_dir=chunks_dir,
-            status_cb=status_cb,
-        )
+            result = align_in_chunks(
+                wav_path=wav_path,
+                normalized_text=normalized_text,
+                gentle_url=gentle_url,
+                work_dir=chunks_dir,
+                status_cb=status_cb,
+            )
         write_json(alignment_path, result)
 
         _write_status(case_dir, "building")
         words = result.get("words", [])
         entries = build_paragraph_entries_from_alignment(original_text, words, normalized_text)
+        # Attach mapped parts for precise karaoke timing
+        try:
+            mapped = build_mapped_parts(original_text, words)
+            result["mapped"] = mapped
+            write_json(alignment_path, result)
+        except Exception:
+            pass
         write_json(transcript_json, entries)
 
         _write_status(case_dir, "done")

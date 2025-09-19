@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, send_from_directory
+from flask import Flask, jsonify
 from config import Config
 from database.session import db
 from routes.auth import auth_bp
@@ -22,7 +22,14 @@ def create_app():
     app.register_blueprint(profile_bp)
     app.register_blueprint(comments_bp)
     app.register_blueprint(cases_bp)
-    CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+    # CORS setup from Config
+    origins_raw = app.config.get("CORS_ORIGINS", "*")
+    origins = [o.strip() for o in origins_raw.split(",") if o.strip()] if "," in origins_raw else origins_raw
+    supports_credentials = bool(app.config.get("CORS_SUPPORTS_CREDENTIALS", False))
+    # If wildcard origins, disable credentials to satisfy browser rules
+    if origins == "*" and supports_credentials:
+        supports_credentials = False
+    CORS(app, resources={r"/*": {"origins": origins}}, supports_credentials=supports_credentials)
 
     # Serve the frontend index at root
     @app.route('/')

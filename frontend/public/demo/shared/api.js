@@ -17,8 +17,8 @@ class LegalSyncAPI {
         });
 
         if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.detail || 'Request failed');
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || errorData.message || 'Request failed');
         }
 
         return response.json();
@@ -121,8 +121,8 @@ class LegalSyncAPI {
         });
 
         if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.detail || 'Request failed');
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || errorData.message || 'Request failed');
         }
 
         return response.json();

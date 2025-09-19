@@ -5,7 +5,14 @@
     "end": 27.867562,
     "text": "We realized we were really inherently excited about the future of coding and I think we took a step back and realized that if we were being really consistent with our beliefs there was going to be an opportunity for all of coding to change in the next five years and for all of software development to flow through models. It felt like no one working on the space at the time was really taking that seriously. It felt like they had great products and they were making them a bit better but they weren't really aiming for a world where you know all of coding as we know today gets automated and building software ends up looking very very different.",
     "word_count": 121,
-    "comments": []
+    "comments": [
+      {
+        "start_word": 16,
+        "end_word": 19,
+        "internal_comment": "inconsistent with his previous statement",
+        "external_comment": ""
+      }
+    ]
   },
   {
     "index": 1,
@@ -13,7 +20,14 @@
     "end": 54.932,
     "text": "Then with that in mind we set out to to work on them. Let's start with this talk with sort of the origin story of your journey as a founder. You kind of have to go way back to middle school when you were reading the essays from PG, right? So early on I think you know I had been interested in starting a company for a long time.",
     "word_count": 69,
-    "comments": []
+    "comments": [
+      {
+        "start_word": 46,
+        "end_word": 48,
+        "internal_comment": "",
+        "external_comment": "mistranscription: essays from PC"
+      }
+    ]
   },
   {
     "index": 2,
@@ -45,14 +59,7 @@
     "end": 129.200125,
     "text": "He's kind of trying to paint or something like that. I kept going and bought a book on Objective-C and then eventually started working on on mobile games. That was the genesis of me getting into programming and then along the way also yes was a big fan of PG's essays and Sam's essays too also and a bunch of the folks in YC and that was definitely a big inspiration even from the very early stages of high school.",
     "word_count": 81,
-    "comments": [
-      {
-        "start_word": 0,
-        "end_word": 65,
-        "internal_comment": "",
-        "external_comment": "what documents?"
-      }
-    ]
+    "comments": []
   },
   {
     "index": 6,

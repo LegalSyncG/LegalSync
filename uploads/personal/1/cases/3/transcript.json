@@ -5,7 +5,14 @@
     "end": 19.819999,
     "text": "Supercooling is a phenomenon where water, or some other substance, gets colder than its freezing point without freezing. It can result in very cool demonstrations where you smack a bottle of liquid water and it freezes solid before your eyes. But water can also be supercooled in a way that makes it impossible to freeze, even by smacking it.",
     "word_count": 59,
-    "comments": []
+    "comments": [
+      {
+        "start_word": 40,
+        "end_word": 40,
+        "internal_comment": "flagged",
+        "external_comment": ""
+      }
+    ]
   },
   {
     "index": 1,
