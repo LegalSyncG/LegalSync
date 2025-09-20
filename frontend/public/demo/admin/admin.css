@@ -81,6 +81,14 @@ body {
   border-radius: 4px;
 }
 
+/* Subtle mismatch styling for words that differ vs. transcript */
+.word.mismatch {
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
+  text-decoration-color: rgba(220, 53, 69, 0.8);
+  text-decoration-thickness: 2px;
+}
+
 .admin-header h1 {
   color: white;
   margin-bottom: 0;

@@ -4,7 +4,7 @@ import shutil
 from enum import Enum
 
 from flask import Response, request, jsonify
-from flask_jwt_extended import verify_jwt_in_request, decode_token, jwt_required, get_jwt_identity
+from flask_jwt_extended import verify_jwt_in_request, decode_token, get_jwt_identity
 from database.session import db
 from database.models import Files, Cases
 from routes.profile import profile_bp
@@ -62,15 +62,26 @@ def create_case(user_id, name, nr):
 
 @profile_bp.route('/stream/<int:file_id>', methods=['GET'])
 def stream_audio(file_id):
-    token = request.args.get('token')
-    if not token:
-        return {"error": "Missing token"}, 401
+    """Stream audio with JWT auth.
+    Preferred: Authorization: Bearer <token> header.
+    Backward compat: ?token=<jwt> query param.
+    """
+    user_id = None
+    # Try standard Authorization header first
     try:
-        identity = decode_token(token)["sub"]
+        verify_jwt_in_request()
+        identity = get_jwt_identity()
+        user_id = json.loads(identity)["id"]
     except Exception:
-        return {"error": "Invalid token"}, 401
-
-    user_id = json.loads(identity)["id"]  # Assuming identity is JSON string
+        # Fallback to token in query param (legacy)
+        token = request.args.get('token')
+        if not token:
+            return {"error": "Missing token"}, 401
+        try:
+            identity = decode_token(token).get("sub")
+            user_id = json.loads(identity)["id"]
+        except Exception:
+            return {"error": "Invalid token"}, 401
     file = Files.query.filter_by(id=file_id, owner_id=user_id).first()
 
     if not file or not os.path.isfile(file.pathname):
@@ -112,9 +123,13 @@ def stream_audio(file_id):
         )
 
 @profile_bp.route('/text/<int:file_id>', methods=['GET'])
-@jwt_required()
 def get_text_content(file_id):
-    identity = get_jwt_identity()
+    # Require Authorization header for text access
+    try:
+        verify_jwt_in_request()
+        identity = get_jwt_identity()
+    except Exception:
+        return {"error": "Missing or invalid token"}, 401
     user_id = json.loads(identity)['id']
     file = Files.query.filter_by(id=file_id, owner_id=user_id).first()
 
@@ -124,6 +139,5 @@ def get_text_content(file_id):
     with open(file.pathname, 'r', encoding='utf-8') as f:
         contents = f.read()
     return jsonify({"content": contents})
-
 
 

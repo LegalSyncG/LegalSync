@@ -1,7 +1,7 @@
 import os
 import json
 import subprocess
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple, Optional
 
 import requests
 import re
@@ -138,10 +138,370 @@ def _run_ffmpeg_to_wav(src_audio: str, dst_wav: str) -> None:
 
 
 def _tokenize_words(text: str) -> List[str]:
-    """Very simple tokenizer to approximate Gentle tokenization for word counting."""
-    import re
+    """Simple Unicode-aware word tokenizer for counting/mapping."""
+    tokens: List[str] = []
+    buf: List[str] = []
+    for ch in text:
+        if ch.isalpha() or ch == "'":
+            buf.append(ch)
+        else:
+            if buf:
+                tokens.append("".join(buf))
+                buf = []
+    if buf:
+        tokens.append("".join(buf))
+    return tokens
 
-    return re.findall(r"[A-Za-z']+", text)
+
+_SPLIT_PATTERN = r"([\\p{L}']+|[0-9][0-9.,–—-]*)"  # for frontend hint only
+
+
+def _normalize_token(tok: str) -> str:
+    # Keep Unicode letters and apostrophe; drop others. Lowercase with Unicode.
+    t = tok.lower()
+    return "".join(ch for ch in t if (ch.isalpha() or ch == "'"))
+
+
+def _expand_number_token(token: str) -> List[str]:
+    """Expand number token to words similar to normalize_for_alignment mapping.
+    Handles digits, decimal point, and dashes.
+    """
+    digit_map = {
+        '0': 'zero', '1': 'one', '2': 'two', '3': 'three', '4': 'four',
+        '5': 'five', '6': 'six', '7': 'seven', '8': 'eight', '9': 'nine'
+    }
+    s = token.replace(',', '')
+    out: List[str] = []
+    for ch in s:
+        if ch in digit_map:
+            out.append(digit_map[ch])
+        elif ch == '.' or ch == '·':
+            out.append('point')
+        elif ch in {'-', '–', '—'}:
+            out.append('dash')
+    return out
+
+
+def _split_transcript_parts(text: str) -> List[str]:
+    # Unicode-aware splitter: groups of letters (any alphabet) and groups of numeric tokens
+    parts: List[str] = []
+    buf: List[str] = []
+    mode: Optional[str] = None  # 'alpha' | 'num' | None
+    number_chars = set("0123456789.,–—-")
+    for ch in text:
+        if ch.isalpha() or ch == "'":
+            if mode != 'alpha':
+                if buf:
+                    parts.append("".join(buf))
+                buf = []
+                mode = 'alpha'
+            buf.append(ch)
+        elif ch in number_chars:
+            if mode != 'num':
+                if buf:
+                    parts.append("".join(buf))
+                buf = []
+                mode = 'num'
+            buf.append(ch)
+        else:
+            if buf:
+                parts.append("".join(buf))
+                buf = []
+            mode = None
+            parts.append(ch)
+    if buf:
+        parts.append("".join(buf))
+    return parts
+
+
+def _build_norm_sequence_from_parts(parts: List[str]) -> Tuple[List[str], List[Tuple[int, Optional[int]]]]:
+    """Return (norm_tokens, owners) where owners[i] = (part_index, sub_index or None).
+    Alpha tokens create one norm token; numeric tokens expand into multiple norm tokens.
+    """
+    norm_tokens: List[str] = []
+    owners: List[Tuple[int, Optional[int]]] = []
+    for idx, part in enumerate(parts):
+        if not part:
+            continue
+        if re.fullmatch(r"[A-Za-z']+", part or ""):
+            norm_tokens.append(_normalize_token(part))
+            owners.append((idx, None))
+        elif re.fullmatch(r"[0-9][0-9.,–—-]*", part or ""):
+            exp = _expand_number_token(part)
+            for si, w in enumerate(exp):
+                norm_tokens.append(_normalize_token(w))
+                owners.append((idx, si))
+        else:
+            # non-word parts ignored in norm sequence
+            pass
+    return norm_tokens, owners
+
+
+def _dp_align_blocks(T: List[str], R: List[str], block_size: int = 160, extra: int = 80) -> List[int]:
+    """Align T to R using blockwise edit-distance DP, return mapping of len(T) -> index in R or -1.
+    Splitting to keep memory/time reasonable on large transcripts.
+    """
+    def dp_map(subT: List[str], subR: List[str]) -> List[int]:
+        n, m = len(subT), len(subR)
+        # small dynamic programming edit-distance table
+        score = [[0]*(m+1) for _ in range(n+1)]
+        back = [[0]*(m+1) for _ in range(n+1)]  # 0 diag, 1 up (del T), 2 left (ins T)
+        for i in range(1, n+1):
+            score[i][0] = i; back[i][0] = 1
+        for j in range(1, m+1):
+            score[0][j] = j; back[0][j] = 2
+        for i in range(1, n+1):
+            Ti = subT[i-1]
+            for j in range(1, m+1):
+                cost = 0 if Ti == subR[j-1] else 1
+                v = score[i-1][j-1] + cost; d = 0
+                up = score[i-1][j] + 1
+                if up < v:
+                    v = up; d = 1
+                left = score[i][j-1] + 1
+                if left < v:
+                    v = left; d = 2
+                score[i][j] = v; back[i][j] = d
+        # backtrack
+        mapping = [-1]*n
+        i, j = n, m
+        while i > 0 or j > 0:
+            d = back[i][j]
+            if i > 0 and j > 0 and d == 0:
+                mapping[i-1] = j-1
+                i -= 1; j -= 1
+            elif i > 0 and (j == 0 or d == 1):
+                mapping[i-1] = -1
+                i -= 1
+            else:
+                j -= 1
+        return mapping
+
+    out = [-1]*len(T)
+    r_start = 0
+    Rlen = len(R)
+    for t0 in range(0, len(T), block_size):
+        t1 = min(len(T), t0 + block_size)
+        subT = T[t0:t1]
+        win_len = min(Rlen - r_start, len(subT)*2 + extra)
+        r_end = r_start + max(0, win_len)
+        subR = R[r_start:r_end]
+        mapping = dp_map(subT, subR)
+        last = -1
+        for i, mj in enumerate(mapping):
+            if mj >= 0:
+                out[t0 + i] = r_start + mj
+                last = r_start + mj
+        if last >= 0:
+            r_start = max(last + 1 - 8, r_start)
+        else:
+            r_start = min(Rlen, r_start + len(subT))
+    return out
+
+
+def build_mapped_parts(transcript_text: str, recognized_words: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return mapping suitable for frontend rendering without client-side matching.
+
+    Produces: { 'split_regex': pattern, 'parts_times': [ {start,end}|None, ... ] }
+    where parts come from splitting the full transcript by the shared regex.
+    Number tokens aggregate times across their expanded components.
+    """
+    parts = _split_transcript_parts(transcript_text)
+    T, owners = _build_norm_sequence_from_parts(parts)
+    R = [ _normalize_token((w.get('word') or '')) for w in recognized_words ]
+    # Try anchored alignment first (assumes majority of transcript is correct)
+    mapping = _anchored_alignment(T, R)
+    # Fallback to block DP if coverage too low
+    if mapping.count(-1) > max(0, int(len(mapping) * 0.35)):
+        mapping = _dp_align_blocks(T, R)
+    # Compute times per part index
+    parts_times: List[Optional[Dict[str, float]]] = [None for _ in parts]
+    # Gather per-part matched recognized indices
+    from collections import defaultdict
+    idxs_by_part: Dict[int, List[int]] = defaultdict(list)
+    for t_idx, r_idx in enumerate(mapping):
+        if r_idx < 0:
+            continue
+        part_idx, _ = owners[t_idx]
+        if 0 <= r_idx < len(recognized_words):
+            idxs_by_part[part_idx].append(r_idx)
+    for p_idx, r_list in idxs_by_part.items():
+        starts = [recognized_words[j].get('start') for j in r_list if recognized_words[j].get('start') is not None]
+        ends = [recognized_words[j].get('end') for j in r_list if recognized_words[j].get('end') is not None]
+        if starts and ends:
+            parts_times[p_idx] = {'start': float(min(starts)), 'end': float(max(ends))}
+    return { 'split_regex': _SPLIT_PATTERN, 'parts_times': parts_times }
+
+
+def _dp_map(subT: List[str], subR: List[str]) -> List[int]:
+    n, m = len(subT), len(subR)
+    if n == 0:
+        return []
+    if m == 0:
+        return [-1] * n
+    score = [[0] * (m + 1) for _ in range(n + 1)]
+    back = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        score[i][0] = i; back[i][0] = 1
+    for j in range(1, m + 1):
+        score[0][j] = j; back[0][j] = 2
+    for i in range(1, n + 1):
+        Ti = subT[i - 1]
+        for j in range(1, m + 1):
+            cost = 0 if Ti == subR[j - 1] else 1
+            v = score[i - 1][j - 1] + cost; d = 0
+            up = score[i - 1][j] + 1
+            if up < v:
+                v = up; d = 1
+            left = score[i][j - 1] + 1
+            if left < v:
+                v = left; d = 2
+            score[i][j] = v; back[i][j] = d
+    mapping = [-1] * n
+    i, j = n, m
+    while i > 0 or j > 0:
+        d = back[i][j]
+        if i > 0 and j > 0 and d == 0:
+            mapping[i - 1] = j - 1
+            i -= 1; j -= 1
+        elif i > 0 and (j == 0 or d == 1):
+            mapping[i - 1] = -1
+            i -= 1
+        else:
+            j -= 1
+    return mapping
+
+
+def _anchored_alignment(
+    T: List[str],
+    R: List[str],
+    step: Optional[int] = None,
+    window: Optional[int] = None,
+    n_max: Optional[int] = None,
+    n_min: Optional[int] = None,
+    allow_unigram_fallback: Optional[bool] = None,
+) -> List[int]:
+    """Anchor-based mapping with dynamic n-grams.
+
+    - Co N-te słowo T[i] szukamy kotwicy w R w oknie ±window wokół przewidywanego indeksu i*ratio.
+    - Najpierw próbujemy kotwic o długości n in [n_max..n_min], następnie opcjonalnie unigram.
+    - Pomiędzy kotwicami robimy lekkie DP (_dp_map).
+    """
+    nT, nR = len(T), len(R)
+    mapping = [-1] * nT
+    if nT == 0 or nR == 0:
+        return mapping
+    step = step or int(os.getenv('ANCHOR_STEP', '10'))
+    window = window or int(os.getenv('ANCHOR_WINDOW', '3'))
+    n_max = n_max or int(os.getenv('ANCHOR_N_MAX', '5'))
+    n_min = n_min or int(os.getenv('ANCHOR_N_MIN', '2'))
+    allow_unigram_fallback = (
+        allow_unigram_fallback
+        if allow_unigram_fallback is not None
+        else os.getenv('ANCHOR_ALLOW_UNIGRAM', '1').lower() in {'1', 'true', 'yes'}
+    )
+    ratio = nR / max(1, nT)
+
+    anchors: List[Tuple[int, int]] = []
+    prev_r = -1
+    i = 0
+    while i < nT:
+        r0 = int(round(i * ratio))
+        rmin = max(prev_r + 1, r0 - window)
+        rmax = min(nR - 1, r0 + window)
+        best_anchor = None  # (r, n)
+
+        # Try multi-gram anchors from n_max down to n_min
+        for n in range(max(2, n_max), max(1, n_min) - 1, -1):
+            if i + n > nT:
+                continue
+            # collect candidates r where R[r:r+n] == T[i:i+n]
+            local_best = None
+            for r in range(rmin, rmax + 1):
+                if r + n > nR:
+                    continue
+                # respect monotonic increase
+                if r <= prev_r:
+                    continue
+                match = True
+                for k in range(n):
+                    if R[r + k] != T[i + k]:
+                        match = False
+                        break
+                if match:
+                    # pick nearest to predicted r0
+                    if local_best is None or abs(r - r0) < abs(local_best - r0):
+                        local_best = r
+            if local_best is not None:
+                best_anchor = (local_best, n)
+                break  # prefer longest successful n
+
+        # Fallback to unigram near predicted index
+        if best_anchor is None and allow_unigram_fallback:
+            cands = [r for r in range(rmin, rmax + 1) if r > prev_r and R[r] == T[i]]
+            if cands:
+                rr = min(cands, key=lambda rr: abs(rr - r0))
+                best_anchor = (rr, 1)
+
+        if best_anchor is not None:
+            rr, n = best_anchor
+            anchors.append((i, rr))
+            prev_r = rr
+        i += step
+
+    # try force last token as anchor if close to end
+    if nT > 4 and nR > 4:
+        # Try multi-gram at tail first
+        t_last = nT - 1
+        r_target = nR - 1
+        rmin_tail = max(prev_r + 1, r_target - max(8, window * 2))
+        rmax_tail = nR - 1
+        done_tail = False
+        for n in range(max(2, n_max), max(1, n_min) - 1, -1):
+            i0 = max(0, nT - n)
+            for r in range(rmin_tail, rmax_tail + 1):
+                if r + n > nR:
+                    continue
+                if r <= prev_r:
+                    continue
+                ok = True
+                for k in range(n):
+                    if R[r + k] != T[i0 + k]:
+                        ok = False
+                        break
+                if ok:
+                    anchors.append((i0, r))
+                    done_tail = True
+                    break
+            if done_tail:
+                break
+        if not done_tail:
+            cands = [r for r in range(rmin_tail, rmax_tail + 1) if r > prev_r and R[r] == T[t_last]]
+            if cands:
+                rr = min(cands, key=lambda rr: abs(rr - r_target))
+                anchors.append((t_last, rr))
+
+    # Align segments between anchors
+    prev_t = -1; prev_r = -1
+    for (ta, ra) in anchors:
+        t0 = prev_t + 1; t1 = ta
+        r0 = prev_r + 1; r1 = ra
+        if t1 > t0 and r1 >= r0:
+            sub_map = _dp_map(T[t0:t1], R[r0:r1])
+            for k, mj in enumerate(sub_map):
+                if mj >= 0:
+                    mapping[t0 + k] = r0 + mj
+        mapping[ta] = ra
+        prev_t, prev_r = ta, ra
+
+    # Tail segment
+    t0 = prev_t + 1; r0 = prev_r + 1
+    if t0 < nT and r0 < nR:
+        sub_map = _dp_map(T[t0:nT], R[r0:nR])
+        for k, mj in enumerate(sub_map):
+            if mj >= 0:
+                mapping[t0 + k] = r0 + mj
+    return mapping
 
 
 def normalize_for_alignment(text: str) -> str:

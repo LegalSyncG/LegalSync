@@ -22,7 +22,7 @@ class Files(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(80), unique=False, nullable=False)
     owner_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    pathname = db.Column(db.String(80), unique=False, nullable=False)
+    pathname = db.Column(db.String(255), unique=False, nullable=False)
     can_edit = db.Column(db.Boolean, unique=False, nullable=False)
 
 class Cases(db.Model):

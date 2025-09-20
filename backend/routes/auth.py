@@ -23,15 +23,15 @@ def signup():
     data = request.get_json()
 
     if User.query.filter_by(username=data['username']).first():
-        return jsonify({"msg": "Username already exists"}), 400
+        return jsonify({"error": "Username already exists"}), 400
 
     if len(data['username']) > 80:
-        return jsonify({"msg": "Username is too long!"}), 400
+        return jsonify({"error": "Username is too long"}), 400
 
     user = User(username=data['username'])
     if 'email' in data:
         if not is_valid_email(data['email']):
-            return jsonify({"msg": "Invalid email"}), 400
+            return jsonify({"error": "Invalid email"}), 400
         user.email = data['email']
     user.set_password(data['password'])
     db.session.add(user)
@@ -43,15 +43,15 @@ def signup():
     cases = ['Sample Case 1', 'Sample Case 2']
     for i in [0, 1]:
         create_case(user.id, cases[i], i)
-    return jsonify({"token": token}), 201 # Created
+    return jsonify({"token": token}), 201  # Created
 
 @auth_bp.route('/auth/login', methods=['POST'])
 def login():
     data = request.get_json()
     user = User.query.filter_by(username=data['username']).first()
     if user and user.check_password(data['password']):
-        token = create_access_token(identity=json.dumps({"id": user.id, "username": user.username}),
-                                    expires_delta=timedelta(days=1))
-        return jsonify({"token": token}), 200 # Login successful
-    return jsonify({"msg": "Invalid credentials"}), 401 # Forbidden
-
+        token = create_access_token(
+            identity=json.dumps({"id": user.id, "username": user.username}),
+            expires_delta=timedelta(days=1))
+        return jsonify({"token": token}), 200  # Login successful
+    return jsonify({"error": "Invalid credentials"}), 401  # Unauthorized

@@ -35,8 +35,8 @@
       loginBtn.textContent = 'Logging in...';
       
       await Auth.login(username, password);
-      const user = Auth.getCurrentUser();
-      window.location.href = `/demo/${user.role}/dashboard.html`;
+      // Redirect to dashboard (single demo area)
+      window.location.href = '/demo/admin/dashboard.html';
     } catch (error) {
       console.error('Login error:', error);
       showNotification('Login failed. Check your credentials');
@@ -48,4 +48,3 @@
       }
     }
   });
-

@@ -15,17 +15,15 @@ async login(username, password) {
     });
 
     if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.detail || 'Login failed');
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || 'Login failed');
     }
 
     const data = await response.json();
     this.token = data.token; 
     
-    this.user = { 
-      username, 
-      role: 'admin'
-    };
+    // Minimal user payload for demo; backend does not expose role
+    this.user = { username };
 
     sessionStorage.setItem('legalSyncToken', data.token);
     sessionStorage.setItem('legalSyncUser', JSON.stringify(this.user));

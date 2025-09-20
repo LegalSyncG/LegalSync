@@ -271,12 +271,13 @@ function showNotification(message, type = 'success') {
       });
     }
 
-    function renderKaraokeOriginal(audio, words, transcriptTextRaw) {
+    function renderKaraokeOriginal(audio, words, transcriptTextRaw, mapped) {
       const container = document.getElementById('transcriptText');
       container.innerHTML = '';
       // Split transcript into word and non-word segments, preserving exact punctuation and newlines
-      const parts = transcriptTextRaw.split(/([A-Za-z']+|[0-9][0-9.,–—-]*)/);
-      let wi = 0;
+      const parts = transcriptTextRaw.split(/([\p{L}']+|[0-9][0-9.,–—-]*)/u);
+      const norm = (s) => (s || '').toLocaleLowerCase().normalize('NFC').replace(/[^\p{L}']+/gu, '');
+      const rnorm = words.map(w => norm(w.word));
       const NUM = {0:'zero',1:'one',2:'two',3:'three',4:'four',5:'five',6:'six',7:'seven',8:'eight',9:'nine'};
       const TEENS = {10:'ten',11:'eleven',12:'twelve',13:'thirteen',14:'fourteen',15:'fifteen',16:'sixteen',17:'seventeen',18:'eighteen',19:'nineteen'};
       const TENS = {2:'twenty',3:'thirty',4:'forty',5:'fifty',6:'sixty',7:'seventy',8:'eighty',9:'ninety'};
@@ -322,32 +323,125 @@ function showNotification(message, type = 'success') {
         }
         return [];
       }
-      parts.forEach(part => {
-        if (part === '') return;
-        if (/^[A-Za-z']+$/.test(part)) {
-          const w = words[wi++] || {};
+      // Build flat transcript token list (normalized), expanding numeric tokens into words
+      const Tnorm = [];
+      const tokenMeta = []; // maps each token to its source part and position
+      const isAlpha = (s) => /^[\p{L}']+$/u.test(s);
+      const isNum = (s) => /^[0-9][0-9.,–—-]*$/.test(s);
+      parts.forEach((part, idx) => {
+        if (!part) return;
+        if (isAlpha(part)) {
+          Tnorm.push(norm(part));
+          tokenMeta.push({ partIndex: idx, type: 'alpha' });
+        } else if (isNum(part)) {
+          const exp = expandNumberToWords(part);
+          exp.forEach((w, k) => {
+            Tnorm.push(norm(w));
+            tokenMeta.push({ partIndex: idx, type: 'num', subIndex: k, total: exp.length });
+          });
+        }
+      });
+
+      // Dynamic programming alignment in manageable blocks
+      function alignDP(T, R) {
+        const n = T.length, m = R.length;
+        const score = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+        const back = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0)); // 0 diag, 1 up, 2 left
+        for (let i = 1; i <= n; i++) { score[i][0] = i; back[i][0] = 1; }
+        for (let j = 1; j <= m; j++) { score[0][j] = j; back[0][j] = 2; }
+        for (let i = 1; i <= n; i++) {
+          const Ti = T[i - 1];
+          for (let j = 1; j <= m; j++) {
+            const cost = (Ti === R[j - 1]) ? 0 : 1;
+            let v = score[i - 1][j - 1] + cost; let d = 0;
+            const up = score[i - 1][j] + 1; if (up < v) { v = up; d = 1; }
+            const left = score[i][j - 1] + 1; if (left < v) { v = left; d = 2; }
+            score[i][j] = v; back[i][j] = d;
+          }
+        }
+        const map = new Array(n).fill(-1);
+        let i = n, j = m;
+        while (i > 0 || j > 0) {
+          const d = back[i][j];
+          if (i > 0 && j > 0 && d === 0) { map[i - 1] = j - 1; i--; j--; }
+          else if (i > 0 && (j === 0 || d === 1)) { map[i - 1] = -1; i--; }
+          else { j--; }
+        }
+        return map;
+      }
+
+      function alignBlocks(T, R, blockSize = 120, extra = 60) {
+        const out = new Array(T.length).fill(-1);
+        let rStart = 0; const Rlen = R.length;
+        for (let t0 = 0; t0 < T.length; t0 += blockSize) {
+          const t1 = Math.min(T.length, t0 + blockSize);
+          const subT = T.slice(t0, t1);
+          const windowLen = Math.min(Rlen - rStart, subT.length * 2 + extra);
+          const rEnd = rStart + Math.max(0, windowLen);
+          const subR = R.slice(rStart, rEnd);
+          const map = alignDP(subT, subR);
+          let last = -1;
+          for (let i = 0; i < map.length; i++) {
+            const j = map[i];
+            if (j >= 0) { out[t0 + i] = rStart + j; last = rStart + j; }
+          }
+          if (last >= 0) rStart = Math.max(last + 1 - 8, rStart);
+          else rStart = Math.min(Rlen, rStart + subT.length);
+        }
+        return out;
+      }
+
+      // If backend provided precise timings per split-part, prefer them
+      let backendPartTimes = null;
+      if (mapped && mapped.parts_times && Array.isArray(mapped.parts_times) && mapped.parts_times.length === parts.length) {
+        backendPartTimes = mapped.parts_times;
+      }
+      const mapping = backendPartTimes ? null : alignBlocks(Tnorm, rnorm);
+
+      // Render by consuming mapping tokens in order and aggregating over number groups
+      let tokPtr = 0;
+      parts.forEach((part, idx) => {
+        if (!part) return;
+        if (/^[\p{L}']+$/u.test(part)) {
+          let s = undefined, e = undefined, mismatch = false;
+          if (backendPartTimes) {
+            const t = backendPartTimes[idx];
+            if (t && t.start != null && t.end != null) { s = t.start; e = t.end; } else { mismatch = true; }
+          } else {
+            const j = tokPtr < mapping.length ? mapping[tokPtr++] : -1;
+            const w = (j >= 0 ? words[j] : {}) || {};
+            s = w.start; e = w.end;
+            mismatch = (j < 0) || (norm(part) !== (j >= 0 ? rnorm[j] : ''));
+          }
           const span = document.createElement('span');
-          span.className = 'word';
+          span.className = 'word' + (mismatch ? ' mismatch' : '');
           span.textContent = part;
-          if (w.start != null) span.dataset.start = w.start;
-          if (w.end != null) span.dataset.end = w.end;
+          if (s != null) span.dataset.start = s;
+          if (e != null) span.dataset.end = e;
           span.addEventListener('click', () => { if (span.dataset.start) audio.currentTime = parseFloat(span.dataset.start); });
           container.appendChild(span);
         } else if (/^[0-9][0-9.,–—-]*$/.test(part)) {
-          // Aggregate timing from the number of expanded words consumed by aligner
-          const exp = expandNumberToWords(part);
-          const slice = words.slice(wi, wi + exp.length);
-          wi += exp.length;
-          const starts = slice.map(x=>x.start).filter(v=>v!=null);
-          const ends = slice.map(x=>x.end).filter(v=>v!=null);
-          const s = starts.length? Math.min(...starts): undefined;
-          const e = ends.length? Math.max(...ends): undefined;
+          let s = undefined, e = undefined, mismatch = false;
+          if (backendPartTimes) {
+            const t = backendPartTimes[idx];
+            if (t && t.start != null && t.end != null) { s = t.start; e = t.end; } else { mismatch = true; }
+          } else {
+            const exp = expandNumberToWords(part);
+            const idxs = [];
+            for (let k = 0; k < exp.length; k++) { idxs.push(tokPtr < mapping.length ? mapping[tokPtr++] : -1); }
+            const slice = idxs.filter(j => j >= 0).map(j => words[j]).filter(Boolean);
+            const starts = slice.map(x => x.start).filter(v => v != null);
+            const ends = slice.map(x => x.end).filter(v => v != null);
+            s = starts.length ? Math.min(...starts) : undefined;
+            e = ends.length ? Math.max(...ends) : undefined;
+            mismatch = idxs.some(j => j < 0);
+          }
           const span = document.createElement('span');
-          span.className = 'word number';
+          span.className = 'word number' + (mismatch ? ' mismatch' : '');
           span.textContent = part;
-          if (s!=null) span.dataset.start = s;
-          if (e!=null) span.dataset.end = e;
-          span.addEventListener('click', ()=>{ if (span.dataset.start) audio.currentTime = parseFloat(span.dataset.start); });
+          if (s != null) span.dataset.start = s;
+          if (e != null) span.dataset.end = e;
+          span.addEventListener('click', () => { if (span.dataset.start) audio.currentTime = parseFloat(span.dataset.start); });
           container.appendChild(span);
         } else {
           container.appendChild(document.createTextNode(part));
@@ -411,7 +505,7 @@ function showNotification(message, type = 'success') {
           }
 
           if (raw && raw.text) {
-            renderKaraokeOriginal(a, alignment.words, raw.text);
+            renderKaraokeOriginal(a, alignment.words, raw.text, alignment.mapped);
           } else {
             renderKaraoke(a, alignment.words);
           }
@@ -441,7 +535,7 @@ function showNotification(message, type = 'success') {
 
     // Build sequence of letter/number tokens across all entries with ordinals
     const wordlike = [];
-    const isAlpha = (t) => /^[A-Za-z']+$/.test(t);
+    const isAlpha = (t) => /^[\p{L}']+$/u.test(t);
     const isNum = (t) => /^[0-9][0-9.,–—-]*$/.test(t);
     entries.forEach((entry, entryIndex) => {
       const tokens = String(entry.text || '').split(/(\s+)/);
