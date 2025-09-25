@@ -14,6 +14,7 @@
           `;
           
           document.body.appendChild(notification);
+          /*comment*/
           
           // Automatyczne usunięcie po 3 sekundach
           setTimeout(() => {

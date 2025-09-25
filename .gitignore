@@ -207,3 +207,9 @@ uploads/personal/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Local data artifacts
+.DS_Store
+uploads/personal/
+uploads/**/*.mp3
+uploads/**/*.wav
