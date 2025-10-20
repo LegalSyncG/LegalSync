@@ -19,6 +19,105 @@
     const cancelEditBtn = document.getElementById('cancelEditBtn');
     const cancelSelectBtn = document.getElementById('cancelSelectBtn');
     const paragraphAudio = document.getElementById('paragraphAudio');
+    const READY_STORAGE_KEY = 'ls_case_ready_map';
+    const READY_SEEN_SESSION_KEY = 'ls_ready_seen_map';
+
+    function readJSON(key, fallback) {
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) return fallback;
+        return JSON.parse(raw);
+      } catch (_) {
+        return fallback;
+      }
+    }
+
+    function writeJSON(key, value) {
+      try {
+        localStorage.setItem(key, JSON.stringify(value));
+      } catch (_) {}
+    }
+
+    function readSessionJSON(key, fallback) {
+      try {
+        const raw = sessionStorage.getItem(key);
+        if (!raw) return fallback;
+        return JSON.parse(raw);
+      } catch (_) {
+        return fallback;
+      }
+    }
+
+    function writeSessionJSON(key, value) {
+      try {
+        sessionStorage.setItem(key, JSON.stringify(value));
+      } catch (_) {}
+    }
+
+    let readySeen = readSessionJSON(READY_SEEN_SESSION_KEY, {});
+    let currentCaseName = '';
+
+    function announceReadyUpdates(map) {
+      if (!map) return;
+      let updated = false;
+      Object.entries(map).forEach(([caseKey, payload]) => {
+        if (!payload || payload.readyAt == null) return;
+        const readyStamp = Number(payload.readyAt) || 0;
+        const seen = Number(readySeen[caseKey]) || 0;
+        if (readyStamp > seen) {
+          const name = payload.caseName || `Case ${caseKey}`;
+          showNotification(`"${name}" is ready to review.`, 'success');
+          readySeen[caseKey] = readyStamp;
+          updated = true;
+        }
+      });
+      if (updated) {
+        writeSessionJSON(READY_SEEN_SESSION_KEY, readySeen);
+      }
+    }
+
+    function recordCaseReady(caseId, caseName, readyAt) {
+      if (!caseId) return;
+      const map = readJSON(READY_STORAGE_KEY, {});
+      const key = String(caseId);
+      const existing = map[key] || {};
+      const existingStamp = Number(existing.readyAt) || 0;
+      let nextStamp = readyAt != null ? Number(readyAt) : NaN;
+      if (!Number.isFinite(nextStamp)) {
+        if (existingStamp) {
+          if (caseName && (!existing.caseName || existing.caseName !== caseName)) {
+            existing.caseName = caseName;
+            map[key] = existing;
+            writeJSON(READY_STORAGE_KEY, map);
+          }
+          return;
+        }
+        nextStamp = Date.now();
+      } else if (existingStamp && nextStamp <= existingStamp) {
+        if (caseName && (!existing.caseName || existing.caseName !== caseName)) {
+          existing.caseName = caseName;
+          map[key] = existing;
+          writeJSON(READY_STORAGE_KEY, map);
+        }
+        return;
+      }
+      const resolvedName = caseName || existing.caseName || `Case ${caseId}`;
+      map[key] = { caseName: resolvedName, readyAt: nextStamp };
+      writeJSON(READY_STORAGE_KEY, map);
+      announceReadyUpdates(map);
+    }
+
+    function initReadyNotifications() {
+      announceReadyUpdates(readJSON(READY_STORAGE_KEY, {}));
+      window.addEventListener('storage', (event) => {
+        if (event.key === READY_STORAGE_KEY) {
+          try {
+            const map = event.newValue ? JSON.parse(event.newValue) : {};
+            announceReadyUpdates(map);
+          } catch (_) {}
+        }
+      });
+    }
 
     let currentSelection = { entryIndex: null, start: null, end: null };
     let transcriptData = [];
@@ -28,6 +127,8 @@
     // Inline segment playback state
     let segmentGuard = { enabled: false, end: 0 };
     let currentlyPlayingIndex = null;
+
+    initReadyNotifications();
 
     function configureAudioForCase(caseData) {
       if (!paragraphAudio || !caseData) return;
@@ -128,6 +229,33 @@
       });
     }
 
+    function startStatusWatcher(caseId, caseName) {
+      if (!caseId) return;
+      let lastStatus = null;
+
+      const poll = async () => {
+        try {
+          const status = await API.getCaseStatus(caseId);
+          if (!status || !status.status) return;
+          if (status.status !== lastStatus) {
+            lastStatus = status.status;
+            if (status.status === 'done') {
+              recordCaseReady(caseId, caseName);
+            } else if (status.status === 'failed') {
+              const name = caseName || `Case ${caseId}`;
+              showNotification(`Alignment failed for "${name}".`, 'error');
+            }
+          }
+        } catch (err) {
+          console.warn('Status watcher error:', err);
+        }
+      };
+
+      poll();
+      const interval = setInterval(poll, 4000);
+      window.addEventListener('beforeunload', () => clearInterval(interval));
+    }
+
     // No dynamic tools visibility needed: nudges are revealed via CSS on hover
 
     // Removed SVG nudge icon; using tiny text buttons "-3" and "+3"
@@ -217,6 +345,11 @@
         showNotification("Loading transcript...", "success");
         const caseData = await API.fetchProtected(`cases/${caseId}`);
         const transcriptRes = await API.fetchProtected(`/text/${caseData.text_file}`);
+        currentCaseName = caseData.name || currentCaseName || '';
+        if (!startStatusWatcher._started) {
+          startStatusWatcher(caseId, currentCaseName);
+          startStatusWatcher._started = true;
+        }
         transcriptData = JSON.parse(transcriptRes.content);
         configureAudioForCase(caseData);
         renderComments(transcriptData);
@@ -486,7 +619,16 @@
 
     function renderComments(data) {
       container.innerHTML = '';
+      let lastPage = null;
       data.forEach((entry, entryIndex) => {
+        const page = entry && typeof entry.page === 'number' ? entry.page : null;
+        if (page != null && page !== lastPage) {
+          const pageLabel = document.createElement('div');
+          pageLabel.className = 'page-label';
+          pageLabel.textContent = `Page ${page}`;
+          container.appendChild(pageLabel);
+          lastPage = page;
+        }
         const entryDiv = document.createElement('div');
         entryDiv.className = 'entry-box';
         entryDiv.dataset.entryIndex = entryIndex;
@@ -1227,21 +1369,50 @@
     if (downloadExternalBtn) {
       downloadExternalBtn.addEventListener('click', async (e) => {
         e.preventDefault();
-        // Close menu
         if (headerMenu) headerMenu.classList.remove('open');
         if (headerMenuBtn) headerMenuBtn.setAttribute('aria-expanded', 'false');
 
+        const textContent = collectExternalCommentsText();
+        if (!textContent) {
+          showNotification('No external comments to export.', 'error');
+          return;
+        }
+
+        const defaultBase = `case-${caseId}-external-comments`;
+        let suggestedName = `${defaultBase}.docx`;
+        let docxBlob = null;
+
         try {
-          const content = collectExternalCommentsText();
-          if (!content) {
+          const response = await API.downloadExternalComments(caseId, 'docx');
+          const disposition = response.headers.get('Content-Disposition');
+          const filename = parseFilenameFromDisposition(disposition);
+          if (filename) {
+            suggestedName = filename;
+          }
+          docxBlob = await response.blob();
+        } catch (err) {
+          if (err && err.status === 400 && String(err.message || '').toLowerCase().includes('no external comments')) {
             showNotification('No external comments to export.', 'error');
             return;
           }
-          const defaultName = `case-${caseId}-external-comments.txt`;
-          const saved = await saveTextWithPicker(defaultName, content);
-          if (!saved) {
-            fallbackDownload(defaultName, content);
-            showNotification('External comments downloaded.', 'success');
+          console.warn('DOCX export unavailable, falling back to TXT:', err);
+          docxBlob = null;
+        }
+
+        try {
+          if (docxBlob) {
+            const saved = await saveExportWithPicker(suggestedName, docxBlob, textContent);
+            if (!saved) {
+              fallbackDownloadBlob(suggestedName, docxBlob);
+              showNotification('External comments downloaded.', 'success');
+            }
+          } else {
+            const textName = /\.docx$/i.test(suggestedName) ? suggestedName.replace(/\.docx$/i, '.txt') : `${defaultBase}.txt`;
+            const savedText = await saveTextWithPicker(textName, textContent);
+            if (!savedText) {
+              fallbackDownload(textName, textContent);
+              showNotification('External comments downloaded.', 'success');
+            }
           }
         } catch (err) {
           console.error('Failed to export external comments:', err);
@@ -1272,11 +1443,13 @@
           const e = Math.max(s, Number(c.end_word) || s);
           const selected = words.slice(s, e + 1);
           const selectedText = selected.join(' ');
+          const safeSelected = selectedText.replace(/"/g, "'");
+          const safeExternal = ext.replace(/"/g, "'");
           const length = Math.max(0, e - s + 1);
           counter += 1;
           lines.push(`[${counter}] Paragraph ${entryIndex + 1}, words ${s + 1}-${e + 1} (length: ${length})`);
-          lines.push(`Text: "${selectedText}"`);
-          lines.push(`External comment: "${ext}"`);
+          lines.push(`Text: '${safeSelected}'`);
+          lines.push(`External comment: '${safeExternal}'`);
           lines.push('');
         });
       });
@@ -1312,8 +1485,57 @@
       return false;
     }
 
-    function fallbackDownload(filename, text) {
-      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    function parseFilenameFromDisposition(disposition) {
+      if (!disposition) return null;
+      const utfMatch = /filename\*\=UTF-8''([^;]+)/i.exec(disposition);
+      if (utfMatch && utfMatch[1]) {
+        try {
+          return decodeURIComponent(utfMatch[1]);
+        } catch (_) {
+          return utfMatch[1];
+        }
+      }
+      const match = /filename=\"?([^\";]+)\"?/i.exec(disposition);
+      if (match && match[1]) {
+        return match[1];
+      }
+      return null;
+    }
+
+    async function saveExportWithPicker(suggestedName, docxBlob, textContent) {
+      const w = /** @type {any} */ (window);
+      if (w && typeof w.showSaveFilePicker === 'function') {
+        try {
+          const handle = await w.showSaveFilePicker({
+            suggestedName,
+            types: [
+              { description: 'Word Document', accept: { 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'] } },
+              { description: 'Text File', accept: { 'text/plain': ['.txt'] } },
+            ],
+          });
+          const writable = await handle.createWritable();
+          const targetName = (handle.name || suggestedName || '').toLowerCase();
+          if ((targetName.endsWith('.txt') || !docxBlob) && typeof textContent === 'string') {
+            await writable.write(textContent);
+          } else if (docxBlob) {
+            const buffer = await docxBlob.arrayBuffer();
+            await writable.write(buffer);
+          } else if (typeof textContent === 'string') {
+            await writable.write(textContent);
+          }
+          await writable.close();
+          showNotification('External comments saved.', 'success');
+          return true;
+        } catch (err) {
+          if (err && (err.name === 'AbortError' || err.code === 20)) return false;
+          console.warn('showSaveFilePicker failed, falling back to download:', err);
+          return false;
+        }
+      }
+      return false;
+    }
+
+    function fallbackDownloadBlob(filename, blob) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -1322,4 +1544,9 @@
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
+    }
+
+    function fallbackDownload(filename, text) {
+      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+      fallbackDownloadBlob(filename, blob);
     }

@@ -24,6 +24,317 @@
     const renameCaseInput = document.getElementById('renameCaseInput');
     let pendingDeleteCaseId = null;
     let pendingRenameCaseId = null;
+    const caseNameById = new Map();
+    const PROGRESS_STORAGE_KEY = 'ls_case_progress';
+    const READY_STORAGE_KEY = 'ls_case_ready_map';
+    const READY_SEEN_SESSION_KEY = 'ls_ready_seen_map';
+    const audioPlayBtn = document.getElementById('audioPlayPause');
+    const audioSpeedSelect = document.getElementById('audioSpeed');
+    const audioSeekEl = document.getElementById('audioSeek');
+    const audioCurrentTimeEl = document.getElementById('audioCurrentTime');
+    const audioDurationEl = document.getElementById('audioDuration');
+
+    function readJSON(key, fallback) {
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) return fallback;
+        return JSON.parse(raw);
+      } catch (_) {
+        return fallback;
+      }
+    }
+
+    function writeJSON(key, value) {
+      try {
+        localStorage.setItem(key, JSON.stringify(value));
+      } catch (_) {}
+    }
+
+    function readSessionJSON(key, fallback) {
+      try {
+        const raw = sessionStorage.getItem(key);
+        if (!raw) return fallback;
+        return JSON.parse(raw);
+      } catch (_) {
+        return fallback;
+      }
+    }
+
+    function writeSessionJSON(key, value) {
+      try {
+        sessionStorage.setItem(key, JSON.stringify(value));
+      } catch (_) {}
+    }
+
+    let progressCache = readJSON(PROGRESS_STORAGE_KEY, {});
+    let readySeen = readSessionJSON(READY_SEEN_SESSION_KEY, {});
+    let activeAudioNode = null;
+    let isAudioScrubbing = false;
+    let audioUiRaf = null;
+    let audioUiInterval = null;
+
+    function getActiveAudio() {
+      if (activeAudioNode && document.body.contains(activeAudioNode)) {
+        return activeAudioNode;
+      }
+      activeAudioNode = document.getElementById('transcriptAudio');
+      return activeAudioNode;
+    }
+
+    function getAudioCurrentTime(audio) {
+      const node = audio || getActiveAudio();
+      return node ? node.currentTime || 0 : 0;
+    }
+
+    function setAudioCurrentTime(time) {
+      const node = getActiveAudio();
+      if (!node) return;
+      const duration = Number.isFinite(node.duration) && node.duration > 0 ? node.duration : null;
+      const target = Number(time) || 0;
+      const clamped = duration != null ? Math.min(duration, Math.max(0, target)) : Math.max(0, target);
+      try { node.currentTime = clamped; } catch (_) {}
+      updateAudioUI(node);
+    }
+
+    function applyAudioSpeed(audio) {
+      const node = audio || getActiveAudio();
+      if (!node) return;
+      if (!audioSpeedSelect) return;
+      const rate = parseFloat(audioSpeedSelect.value || '1');
+      node.playbackRate = Number.isFinite(rate) && rate > 0 ? rate : 1;
+      updateAudioUI(node);
+    }
+
+    function formatTime(seconds) {
+      if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+      const total = Math.floor(seconds);
+      const mins = Math.floor(total / 60);
+      const secs = total % 60;
+      return `${mins}:${secs.toString().padStart(2, '0')}`;
+    }
+
+    function applySeekVisual(value, duration) {
+      if (!audioSeekEl) return;
+      const max = Number.isFinite(duration) && duration > 0 ? duration : 0;
+      const val = Number.isFinite(value) ? value : 0;
+      const pct = max > 0 ? Math.min(100, Math.max(0, (val / max) * 100)) : 0;
+      audioSeekEl.style.background = `linear-gradient(90deg, rgba(36, 58, 115, 0.7) ${pct}%, rgba(75, 95, 178, 0.25) ${pct}%)`;
+    }
+
+    function updateAudioUI(audio) {
+      const node = audio || getActiveAudio();
+      if (!node) return;
+      const duration = Number.isFinite(node.duration) && node.duration > 0 ? node.duration : 0;
+      const current = Number.isFinite(node.currentTime) ? node.currentTime : 0;
+
+      if (audioDurationEl) {
+        audioDurationEl.textContent = formatTime(duration);
+      }
+      if (audioCurrentTimeEl) {
+        audioCurrentTimeEl.textContent = formatTime(current);
+      }
+      if (audioSeekEl) {
+        if (duration > 0) {
+          audioSeekEl.disabled = false;
+          audioSeekEl.max = duration.toString();
+          if (!isAudioScrubbing) {
+            const clamped = Math.min(duration, current);
+            audioSeekEl.value = clamped.toString();
+            if ('valueAsNumber' in audioSeekEl) {
+              audioSeekEl.valueAsNumber = clamped;
+            }
+            applySeekVisual(clamped, duration);
+          } else {
+            applySeekVisual(parseFloat(audioSeekEl.value), duration);
+          }
+        } else {
+          audioSeekEl.disabled = true;
+          audioSeekEl.max = '0';
+          audioSeekEl.value = '0';
+          if ('valueAsNumber' in audioSeekEl) {
+            audioSeekEl.valueAsNumber = 0;
+          }
+          applySeekVisual(0, 0);
+        }
+      }
+      if (audioPlayBtn) {
+        const paused = node.paused;
+        audioPlayBtn.textContent = paused ? 'Play' : 'Pause';
+        audioPlayBtn.setAttribute('aria-label', paused ? 'Play transcript audio' : 'Pause transcript audio');
+      }
+    }
+
+    const requestUiFrame = (typeof window !== 'undefined' && window.requestAnimationFrame)
+      ? (cb) => window.requestAnimationFrame(cb)
+      : (cb) => setTimeout(cb, 16);
+    const cancelUiFrame = (typeof window !== 'undefined' && window.cancelAnimationFrame)
+      ? (handle) => window.cancelAnimationFrame(handle)
+      : (handle) => clearTimeout(handle);
+
+    function stopAudioTicker() {
+      if (audioUiRaf != null) {
+        cancelUiFrame(audioUiRaf);
+        audioUiRaf = null;
+      }
+      if (audioUiInterval != null) {
+        clearInterval(audioUiInterval);
+        audioUiInterval = null;
+      }
+    }
+
+    function startAudioTicker(node) {
+      if (!node) return;
+      stopAudioTicker();
+      const tick = () => updateAudioUI(node);
+      const step = () => {
+        tick();
+        audioUiRaf = requestUiFrame(step);
+      };
+      tick();
+      audioUiRaf = requestUiFrame(step);
+      audioUiInterval = setInterval(() => {
+        if (node.paused && !node.seeking) {
+          return;
+        }
+        tick();
+      }, 200);
+    }
+
+    function setupAudioControls(audio) {
+      const node = audio || getActiveAudio();
+      if (!node) return;
+      activeAudioNode = node;
+      applyAudioSpeed(node);
+      updateAudioUI(node);
+
+      if (audioSpeedSelect) {
+        audioSpeedSelect.onchange = () => {
+          applyAudioSpeed(node);
+        };
+      }
+
+      if (!node.dataset.lsBound) {
+        node.addEventListener('loadedmetadata', () => updateAudioUI(node));
+        node.addEventListener('timeupdate', () => {
+          if (!isAudioScrubbing) updateAudioUI(node);
+        });
+        node.addEventListener('play', () => {
+          startAudioTicker(node);
+          updateAudioUI(node);
+        });
+        node.addEventListener('pause', () => {
+          stopAudioTicker();
+          updateAudioUI(node);
+        });
+        node.addEventListener('ended', () => {
+          stopAudioTicker();
+          updateAudioUI(node);
+          if (audioSeekEl) {
+            const maxVal = Number.parseFloat(audioSeekEl.max) || node.duration || 0;
+            const finalVal = Number.isFinite(maxVal) ? maxVal : node.currentTime || 0;
+            audioSeekEl.value = finalVal.toString();
+            if ('valueAsNumber' in audioSeekEl) {
+              audioSeekEl.valueAsNumber = finalVal;
+            }
+            applySeekVisual(finalVal, maxVal || finalVal);
+          }
+        });
+        node.addEventListener('durationchange', () => updateAudioUI(node));
+        node.addEventListener('seeking', () => updateAudioUI(node));
+        node.dataset.lsBound = '1';
+      }
+
+      if (audioPlayBtn && !audioPlayBtn.dataset.lsBound) {
+        audioPlayBtn.addEventListener('click', () => {
+          const media = getActiveAudio();
+          if (!media) return;
+          if (media.paused) {
+            media.play().catch(() => {});
+          } else {
+            media.pause();
+          }
+          updateAudioUI(media);
+        });
+        audioPlayBtn.dataset.lsBound = '1';
+      }
+
+      if (audioSeekEl && !audioSeekEl.dataset.lsBound) {
+        const endScrub = (value) => {
+          if (!Number.isFinite(value)) return;
+          isAudioScrubbing = false;
+          setAudioCurrentTime(value);
+          const nodeNow = getActiveAudio();
+          if (nodeNow && !nodeNow.paused && !nodeNow.ended) {
+            startAudioTicker(nodeNow);
+          }
+        };
+        const startScrub = () => { isAudioScrubbing = true; stopAudioTicker(); };
+        const pointerSupport = typeof window !== 'undefined' && 'PointerEvent' in window;
+        if (pointerSupport) {
+          audioSeekEl.addEventListener('pointerdown', startScrub);
+          audioSeekEl.addEventListener('pointerup', (e) => endScrub(parseFloat(e.target.value)));
+          audioSeekEl.addEventListener('pointerleave', (e) => {
+            if (isAudioScrubbing) endScrub(parseFloat(e.target.value));
+          });
+          audioSeekEl.addEventListener('pointercancel', (e) => {
+            if (isAudioScrubbing) endScrub(parseFloat(e.target.value));
+          });
+        } else {
+          audioSeekEl.addEventListener('mousedown', startScrub);
+          audioSeekEl.addEventListener('mouseup', (e) => endScrub(parseFloat(e.target.value)));
+          audioSeekEl.addEventListener('mouseleave', (e) => {
+            if (isAudioScrubbing) endScrub(parseFloat(e.target.value));
+          });
+          audioSeekEl.addEventListener('touchstart', startScrub, { passive: true });
+          audioSeekEl.addEventListener('touchend', (e) => endScrub(parseFloat(e.target.value)));
+          audioSeekEl.addEventListener('touchcancel', (e) => {
+            if (isAudioScrubbing) endScrub(parseFloat(e.target.value));
+          });
+        }
+        audioSeekEl.addEventListener('change', (e) => endScrub(parseFloat(e.target.value)));
+        audioSeekEl.addEventListener('input', (e) => {
+          const val = parseFloat(e.target.value);
+          if (Number.isFinite(val) && audioCurrentTimeEl) {
+            audioCurrentTimeEl.textContent = formatTime(val);
+          }
+          if ('valueAsNumber' in audioSeekEl && Number.isFinite(val)) {
+            audioSeekEl.valueAsNumber = val;
+          }
+          applySeekVisual(val, Number.parseFloat(audioSeekEl.max) || 0);
+        });
+        audioSeekEl.disabled = true;
+        audioSeekEl.value = '0';
+        if ('valueAsNumber' in audioSeekEl) {
+          audioSeekEl.valueAsNumber = 0;
+        }
+        audioSeekEl.dataset.lsBound = '1';
+      }
+
+      if (!node.paused && !node.ended) {
+        startAudioTicker(node);
+      }
+    }
+
+    function persistCaseProgress(caseId, payload) {
+      if (!caseId) return;
+      const key = String(caseId);
+      progressCache[key] = payload;
+      writeJSON(PROGRESS_STORAGE_KEY, progressCache);
+    }
+
+    function getCaseProgress(caseId) {
+      if (!caseId) return undefined;
+      return progressCache[String(caseId)];
+    }
+
+    function removeCaseProgress(caseId) {
+      if (!caseId) return;
+      const key = String(caseId);
+      if (progressCache[key]) {
+        delete progressCache[key];
+        writeJSON(PROGRESS_STORAGE_KEY, progressCache);
+      }
+    }
 
     if (addCaseBtn) {
       addCaseBtn.addEventListener('click', () => {
@@ -52,7 +363,14 @@
       confirmDeleteCase.addEventListener('click', async () => {
         try {
           if (!pendingDeleteCaseId) return;
-          await API.deleteCase(pendingDeleteCaseId);
+          const deletingId = pendingDeleteCaseId;
+          await API.deleteCase(deletingId);
+          removeCaseProgress(deletingId);
+          const readyMap = readJSON(READY_STORAGE_KEY, {});
+          if (readyMap && readyMap[String(deletingId)]) {
+            delete readyMap[String(deletingId)];
+            writeJSON(READY_STORAGE_KEY, readyMap);
+          }
           deleteCaseModal.style.display = 'none';
           pendingDeleteCaseId = null;
           // reload list after delete
@@ -94,7 +412,16 @@
     if (pickTranscriptBtn && caseTranscriptFileEl) {
       pickTranscriptBtn.addEventListener('click', () => caseTranscriptFileEl.click());
       caseTranscriptFileEl.addEventListener('change', () => {
-        if (transcriptFileName) transcriptFileName.textContent = caseTranscriptFileEl.files && caseTranscriptFileEl.files[0] ? caseTranscriptFileEl.files[0].name : 'No file chosen';
+        const file = caseTranscriptFileEl.files && caseTranscriptFileEl.files[0];
+        if (file && !isSupportedTranscriptFile(file)) {
+          showNotification('Unsupported transcript file. Please choose a TXT, DOCX, or Pages document.', 'error');
+          caseTranscriptFileEl.value = '';
+          if (transcriptFileName) transcriptFileName.textContent = 'No file chosen';
+          return;
+        }
+        if (transcriptFileName) {
+          transcriptFileName.textContent = file ? file.name : 'No file chosen';
+        }
       });
     }
     // delete handlers configured later with notifications
@@ -110,11 +437,27 @@
       const wrap = document.getElementById('alignStatus');
       const bar = document.getElementById('alignProgress');
       const label = document.getElementById('alignLabel');
-      if (wrap) wrap.style.display = 'none';
-      if (bar) { bar.style.width = '0%'; bar.classList.remove('active','failed','ready'); }
-      if (label) label.textContent = '';
       if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
-      progressWidth = 0; currentStage = null;
+      progressWidth = 0;
+      currentStage = null;
+      if (bar) {
+        bar.style.width = '0%';
+        bar.classList.remove('active','failed','ready');
+      }
+      if (label) label.textContent = 'Waiting…';
+      if (wrap) wrap.style.display = 'none';
+    }
+
+    function restoreProgressUI(caseId) {
+      if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+      progressWidth = 0;
+      currentStage = null;
+      const saved = getCaseProgress(caseId);
+      if (saved && saved.status) {
+        setStage(caseId, saved.status, saved.counts || {}, { instant: true, widthOverride: saved.progress, skipPersist: true });
+      } else {
+        resetProgressUI();
+      }
     }
 
 
@@ -130,12 +473,15 @@
 
 
     // Add this helper to remove all timeupdate listeners from the audio element
-function resetAudioSync(audio) {
-  // Remove all previous listeners by replacing the audio element
-  const newAudio = audio.cloneNode(true);
-  audio.parentNode.replaceChild(newAudio, audio);
-  return newAudio;
-}
+    function resetAudioSync(audio) {
+      // Remove all previous listeners by replacing the audio element
+      stopAudioTicker();
+      const newAudio = audio.cloneNode(true);
+      newAudio.removeAttribute('data-ls-bound');
+      audio.parentNode.replaceChild(newAudio, audio);
+      activeAudioNode = newAudio;
+      return newAudio;
+    }
 
 // Lightweight notification used on dashboard (matches app style)
 function showNotification(message, type = 'success') {
@@ -148,12 +494,98 @@ function showNotification(message, type = 'success') {
   setTimeout(() => { if (n && n.parentNode) { n.style.opacity='0'; setTimeout(()=> n.remove(), 300); } }, 3000);
 }
 
+function announceReadyUpdates(map) {
+  if (!map) return;
+  let updated = false;
+  Object.entries(map).forEach(([caseId, payload]) => {
+    if (!payload || payload.readyAt == null) return;
+    const readyStamp = Number(payload.readyAt) || 0;
+    const seen = Number(readySeen[caseId]) || 0;
+    if (readyStamp > seen) {
+      const name = payload.caseName || `Case ${caseId}`;
+      showNotification(`"${name}" is ready to review.`, 'success');
+      readySeen[caseId] = readyStamp;
+      updated = true;
+    }
+  });
+  if (updated) {
+    writeSessionJSON(READY_SEEN_SESSION_KEY, readySeen);
+  }
+}
+
+function recordCaseReady(caseId, caseName, readyAt) {
+  if (!caseId) return;
+  const map = readJSON(READY_STORAGE_KEY, {});
+  const key = String(caseId);
+  const existing = map[key] || {};
+  const existingStamp = Number(existing.readyAt) || 0;
+  let nextStamp = readyAt != null ? Number(readyAt) : NaN;
+  if (!Number.isFinite(nextStamp)) {
+    if (existingStamp) {
+      if (caseName && (!existing.caseName || existing.caseName !== caseName)) {
+        existing.caseName = caseName;
+        map[key] = existing;
+        writeJSON(READY_STORAGE_KEY, map);
+      }
+      return;
+    }
+    nextStamp = Date.now();
+  } else if (existingStamp && nextStamp <= existingStamp) {
+    if (caseName && (!existing.caseName || existing.caseName !== caseName)) {
+      existing.caseName = caseName;
+      map[key] = existing;
+      writeJSON(READY_STORAGE_KEY, map);
+    }
+    return;
+  }
+  const resolvedName = caseName
+    || existing.caseName
+    || caseNameById.get(caseId)
+    || `Case ${caseId}`;
+  map[key] = { caseName: resolvedName, readyAt: nextStamp };
+  writeJSON(READY_STORAGE_KEY, map);
+  announceReadyUpdates(map);
+}
+
+function initReadyNotifications() {
+  announceReadyUpdates(readJSON(READY_STORAGE_KEY, {}));
+  window.addEventListener('storage', (event) => {
+    if (event.key === READY_STORAGE_KEY) {
+      try {
+        const map = event.newValue ? JSON.parse(event.newValue) : {};
+        announceReadyUpdates(map);
+      } catch (_) {}
+    }
+  });
+}
+
+const SUPPORTED_TRANSCRIPT_EXTENSIONS = ['.txt', '.docx', '.pages'];
+const SUPPORTED_TRANSCRIPT_MIME = [
+  'text/plain',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.apple.pages'
+];
+
+function normalizeExtension(name = '') {
+  const idx = name.lastIndexOf('.');
+  if (idx === -1) return '';
+  return name.slice(idx).toLowerCase();
+}
+
+function isSupportedTranscriptFile(file) {
+  if (!file) return true;
+  const ext = normalizeExtension(file.name || '');
+  if (ext && SUPPORTED_TRANSCRIPT_EXTENSIONS.includes(ext)) return true;
+  const mime = (file.type || '').toLowerCase();
+  return SUPPORTED_TRANSCRIPT_MIME.includes(mime);
+}
+
     // Update syncHighlight to set highlightedParagraphIndex
     function syncHighlight(audio, entries) {
       const container = document.getElementById('transcriptText');
       const paragraphs = container.querySelectorAll('.transcript-paragraph');
-      audio.addEventListener('timeupdate', () => {
-        const currentTime = audio.currentTime;
+      const update = () => {
+        const currentTime = getAudioCurrentTime(audio);
         if(currentTime >= old_start && currentTime < old_end) return;
         for (let i = 0; i < entries.length; i++) {
           const { start, end } = entries[i];
@@ -172,7 +604,8 @@ function showNotification(message, type = 'success') {
             break;
           }
         }
-      });
+      };
+      audio.addEventListener('timeupdate', update);
     }
 
     async function handleCreateCase() {
@@ -182,6 +615,10 @@ function showNotification(message, type = 'success') {
       const name = caseNameEl && caseNameEl.value && caseNameEl.value.trim();
 
       if (!audioFile) { showNotification('Please select an MP3 audio file.', 'error'); return; }
+      if (transcriptFile && !isSupportedTranscriptFile(transcriptFile)) {
+        showNotification('Transcript must be provided as TXT, DOCX, or Pages file.', 'error');
+        return;
+      }
       if (!transcriptFile && !transcriptText) { showNotification('Please provide a transcript (file or pasted text).', 'error'); return; }
       try {
         if (submitAddCase) { submitAddCase.disabled = true; submitAddCase.textContent = 'Uploading...'; }
@@ -207,20 +644,36 @@ function showNotification(message, type = 'success') {
       submitAddCase.addEventListener('click', handleCreateCase);
     }
 
-    function renderTranscript(audio, entries) {
+    function getTranscriptContainer() {
       const container = document.getElementById('transcriptText');
+      if (container) container.classList.remove('transcript-text-placeholder');
+      return container;
+    }
+
+    function renderTranscript(audio, entries) {
+      const container = getTranscriptContainer();
+      if (!container) return;
       container.innerHTML = '';
-    
+      let lastPage = null;
       entries.forEach((entry, index) => {
+        const page = entry && typeof entry.page === 'number' ? entry.page : null;
+        if (page != null && page !== lastPage) {
+          const marker = document.createElement('div');
+          marker.className = 'page-marker';
+          marker.textContent = `Page ${page}`;
+          container.appendChild(marker);
+          lastPage = page;
+        }
         const p = document.createElement('p');
         p.textContent = entry.text;
         p.className = 'transcript-paragraph';
         p.dataset.start = entry.start;
         p.dataset.end = entry.end;
         p.dataset.index = index;
+        if (page != null) p.dataset.page = page;
 
         p.addEventListener('click', () => {
-          audio.currentTime = entries[index].start;
+          setAudioCurrentTime(entries[index].start);
           highlightedParagraphIndex = index; // Track highlighted paragraph
           //audio.play(); 
         });
@@ -235,12 +688,14 @@ function showNotification(message, type = 'success') {
       let audio = document.getElementById('transcriptAudio');
       // Reset audio element to remove previous listeners
       audio = resetAudioSync(audio);
+      setupAudioControls(audio);
       renderTranscript(audio, parsed);
       syncHighlight(audio, parsed);
     }
 
     function renderKaraoke(audio, words) {
-      const container = document.getElementById('transcriptText');
+      const container = getTranscriptContainer();
+      if (!container) return;
       container.innerHTML = '';
       words.forEach((w) => {
         const span = document.createElement('span');
@@ -248,11 +703,13 @@ function showNotification(message, type = 'success') {
         span.className = 'word';
         if (w.start != null) span.dataset.start = w.start;
         if (w.end != null) span.dataset.end = w.end;
-        span.addEventListener('click', () => { if (w.start != null) audio.currentTime = w.start; });
+        span.addEventListener('click', () => {
+          if (w.start != null) setAudioCurrentTime(w.start);
+        });
         container.appendChild(span);
       });
       audio.addEventListener('timeupdate', () => {
-        const current = audio.currentTime;
+        const current = getAudioCurrentTime(audio);
         const spans = container.querySelectorAll('.word');
         let active = null;
         for (const el of spans) {
@@ -269,10 +726,12 @@ function showNotification(message, type = 'success') {
           try { active.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (_) {}
         }
       });
+      setupAudioControls(audio);
     }
 
     function renderKaraokeOriginal(audio, words, transcriptTextRaw, mapped) {
-      const container = document.getElementById('transcriptText');
+      const container = getTranscriptContainer();
+      if (!container) return;
       container.innerHTML = '';
       // Split transcript into word and non-word segments, preserving exact punctuation and newlines
       const parts = transcriptTextRaw.split(/([\p{L}']+|[0-9][0-9.,–—-]*)/u);
@@ -418,7 +877,9 @@ function showNotification(message, type = 'success') {
           span.textContent = part;
           if (s != null) span.dataset.start = s;
           if (e != null) span.dataset.end = e;
-          span.addEventListener('click', () => { if (span.dataset.start) audio.currentTime = parseFloat(span.dataset.start); });
+          span.addEventListener('click', () => {
+            if (span.dataset.start) setAudioCurrentTime(parseFloat(span.dataset.start));
+          });
           container.appendChild(span);
         } else if (/^[0-9][0-9.,–—-]*$/.test(part)) {
           let s = undefined, e = undefined, mismatch = false;
@@ -441,7 +902,9 @@ function showNotification(message, type = 'success') {
           span.textContent = part;
           if (s != null) span.dataset.start = s;
           if (e != null) span.dataset.end = e;
-          span.addEventListener('click', () => { if (span.dataset.start) audio.currentTime = parseFloat(span.dataset.start); });
+          span.addEventListener('click', () => {
+            if (span.dataset.start) setAudioCurrentTime(parseFloat(span.dataset.start));
+          });
           container.appendChild(span);
         } else {
           container.appendChild(document.createTextNode(part));
@@ -449,7 +912,7 @@ function showNotification(message, type = 'success') {
       });
 
       audio.addEventListener('timeupdate', () => {
-        const current = audio.currentTime;
+        const current = getAudioCurrentTime(audio);
         const spans = container.querySelectorAll('.word');
         let active = null;
         spans.forEach(el => {
@@ -476,11 +939,18 @@ function showNotification(message, type = 'success') {
     const audio = document.getElementById('transcriptAudio');
 
     previewPanel.style.display = 'block';
+    if (data && data.id) {
+      caseNameById.set(data.id, data.name || caseNameById.get(data.id) || `Case ${data.id}`);
+    }
+    if (transcriptText) {
+      transcriptText.classList.remove('transcript-text-placeholder');
+    }
     transcriptText.textContent = 'Loading transcript...';
     const token = sessionStorage.getItem('legalSyncToken');
     audioSource.src = `${window.location.origin}/stream/${data.audio_file}?token=${encodeURIComponent(token)}`;
 
     audio.load();
+    setupAudioControls(audio);
     // Update progress estimate from audio duration when available
     audio.addEventListener('loadedmetadata', () => {
       const d = Math.max(1, audio.duration || 0);
@@ -491,7 +961,8 @@ function showNotification(message, type = 'success') {
     try {
       const alignment = await API.getCaseAlignment(data.id);
       if (alignment && alignment.words) {
-        const a = resetAudioSync(audio);
+        const syncedAudio = resetAudioSync(audio);
+        setupAudioControls(syncedAudio);
         // Try to fetch original transcript text and structured entries for mapping
         try {
           const [raw, entriesRes] = await Promise.all([
@@ -505,16 +976,16 @@ function showNotification(message, type = 'success') {
           }
 
           if (raw && raw.text) {
-            renderKaraokeOriginal(a, alignment.words, raw.text, alignment.mapped);
+            renderKaraokeOriginal(syncedAudio, alignment.words, raw.text, alignment.mapped);
           } else {
-            renderKaraoke(a, alignment.words);
+            renderKaraoke(syncedAudio, alignment.words);
           }
           // After rendering words, enable flagging UI if we have entries
           if (__entriesForActiveCase && Array.isArray(__entriesForActiveCase)) {
             try { setupFlaggingUI(__entriesForActiveCase); } catch (e) { console.warn('Flagging setup failed:', e); }
           }
         } catch (_) {
-          renderKaraoke(a, alignment.words);
+          renderKaraoke(syncedAudio, alignment.words);
         }
       } else {
         const res = await API.fetchProtected(`text/${data.text_file}`);
@@ -588,9 +1059,71 @@ function showNotification(message, type = 'success') {
       } catch (err) {
         console.error('Failed to remove flag', err);
         showNotification('Failed to remove flag', 'error');
-      }
+  }
     });
     span.parentNode.insertBefore(icon, span);
+  }
+
+  function findWordSpan(entryIndex, wordOrdinal) {
+    const container = document.getElementById('transcriptText');
+    if (!container) return null;
+    const ord = isNaN(wordOrdinal) ? 0 : wordOrdinal;
+    let target = container.querySelector(`.word[data-entry-index="${entryIndex}"][data-word-ordinal="${ord}"]`);
+    if (!target) {
+      target = container.querySelector(`.word[data-entry-index="${entryIndex}"][data-word-index="${ord}"]`);
+    }
+    if (!target) {
+      const candidates = Array.from(container.querySelectorAll(`.word[data-entry-index="${entryIndex}"]`));
+      target = candidates.find(w => parseInt(w.dataset.wordOrdinal || '-1', 10) >= ord) || candidates[candidates.length - 1];
+    }
+    return target || null;
+  }
+
+  function ensureNoDuplicateCommentIcon(entryIndex, wordOrdinal) {
+    const container = document.getElementById('transcriptText');
+    const sel = container && container.querySelector(
+      `.comment-icon[data-entry-index="${entryIndex}"][data-word-ordinal="${wordOrdinal}"]`
+    );
+    return !!sel;
+  }
+
+  function insertCommentIndicatorBeforeSpan(span, entryIndex, wordOrdinal) {
+    if (!span) return;
+    if (ensureNoDuplicateCommentIcon(entryIndex, wordOrdinal)) return;
+    const icon = document.createElement('span');
+    icon.className = 'comment-icon';
+    icon.textContent = '!';
+    icon.title = 'Comment available';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.dataset.entryIndex = String(entryIndex);
+    icon.dataset.wordOrdinal = String(wordOrdinal);
+    span.dataset.hasComment = 'true';
+    span.parentNode.insertBefore(icon, span);
+  }
+
+  function paintPageBreaks(entries) {
+    const container = document.getElementById('transcriptText');
+    if (!container) return;
+    container.querySelectorAll('.page-marker').forEach((node) => node.remove());
+    if (!Array.isArray(entries) || !entries.length) return;
+    let lastPage = null;
+    entries.forEach((entry, entryIndex) => {
+      const page = entry && typeof entry.page === 'number' ? entry.page : null;
+      if (page == null || page === lastPage) return;
+      let target = container.querySelector(`.word[data-entry-index="${entryIndex}"]`);
+      if (!target) {
+        target = container.querySelector(`.transcript-paragraph[data-index="${entryIndex}"]`);
+      }
+      const marker = document.createElement('div');
+      marker.className = 'page-marker';
+      marker.textContent = `Page ${page}`;
+      if (target && target.parentNode) {
+        target.parentNode.insertBefore(marker, target);
+      } else {
+        container.appendChild(marker);
+      }
+      lastPage = page;
+    });
   }
 
   function showFlagPopup(x, y, onYes) {
@@ -683,18 +1216,31 @@ function showNotification(message, type = 'success') {
       (entry.comments || []).forEach((c) => {
         if (String((c.internal_comment||'').trim().toLowerCase()) !== 'flagged') return;
         const ord = parseInt(c.start_word, 10);
-        // Try by ordinal first
-        let target = container.querySelector(`.word[data-entry-index="${entryIndex}"][data-word-ordinal="${ord}"]`);
-        if (!target) {
-          // Fallback by token index
-          target = container.querySelector(`.word[data-entry-index="${entryIndex}"][data-word-index="${ord}"]`);
+        const target = findWordSpan(entryIndex, isNaN(ord) ? 0 : ord);
+        if (target) {
+          const resolved = isNaN(ord) ? (parseInt(target.dataset.wordOrdinal, 10) || 0) : ord;
+          insertFlagIconBeforeSpan(target, entryIndex, resolved);
         }
-        if (!target) {
-          // Fallback: nearest later word in same entry
-          const candidates = Array.from(container.querySelectorAll(`.word[data-entry-index="${entryIndex}"]`));
-          target = candidates.find(w => parseInt(w.dataset.wordOrdinal || '-1', 10) >= ord) || candidates[candidates.length - 1];
+      });
+    });
+  }
+
+  function paintCommentIndicators(entries) {
+    const container = document.getElementById('transcriptText');
+    if (!container) return;
+    entries.forEach((entry, entryIndex) => {
+      (entry.comments || []).forEach((comment) => {
+        const internal = (comment.internal_comment || '').trim();
+        const external = (comment.external_comment || '').trim();
+        const hasText = Boolean(internal) || Boolean(external);
+        const isFlagOnly = internal.toLowerCase() === 'flagged' && !external;
+        if (!hasText || isFlagOnly) return;
+        const ord = parseInt(comment.start_word, 10);
+        const target = findWordSpan(entryIndex, isNaN(ord) ? 0 : ord);
+        if (target) {
+          const resolved = isNaN(ord) ? (parseInt(target.dataset.wordOrdinal, 10) || 0) : ord;
+          insertCommentIndicatorBeforeSpan(target, entryIndex, resolved);
         }
-        if (target) insertFlagIconBeforeSpan(target, entryIndex, isNaN(ord) ? (parseInt(target.dataset.wordOrdinal,10) || 0) : ord);
       });
     });
   }
@@ -706,6 +1252,8 @@ function showNotification(message, type = 'success') {
     attachWordContextMenus();
     // Render existing flags (old + new)
     paintExistingFlags(entries);
+    paintCommentIndicators(entries);
+    paintPageBreaks(entries);
   }
 
   previewPanel.style.display = 'block';
@@ -719,6 +1267,7 @@ function showNotification(message, type = 'success') {
     showNotification(toast, 'success');
     sessionStorage.removeItem('ls_toast_success');
   }
+  initReadyNotifications();
   const token = sessionStorage.getItem('legalSyncToken');
   const listContainer = document.getElementById('transcriptItems');
   const spinner = document.getElementById('loadingSpinner');
@@ -743,6 +1292,7 @@ function showNotification(message, type = 'success') {
     let currentActive = null;
 
   cases.forEach(caseItem => {
+    caseNameById.set(caseItem.id, caseItem.name);
     const el = document.createElement('div');
     el.className = 'transcript-item';
     el.textContent = caseItem.name;
@@ -813,7 +1363,7 @@ function showNotification(message, type = 'success') {
 
         el.addEventListener('click', async () => {
           activeCaseId = caseItem.id;
-          resetProgressUI();
+          restoreProgressUI(caseItem.id);
           if (currentActive) currentActive.classList.remove('active');
           el.classList.add('active');
           currentActive = el;
@@ -821,6 +1371,9 @@ function showNotification(message, type = 'success') {
           // Always reload preview, even if same case
           try {
             const data = await API.fetchProtected(`cases/${caseItem.id}`);
+            if (data && data.id) {
+              caseNameById.set(data.id, data.name || caseItem.name || `Case ${data.id}`);
+            }
             await showTranscriptPreview(data);
             startStatusPolling(caseItem.id);
           } catch (err) {
@@ -842,8 +1395,11 @@ function showNotification(message, type = 'success') {
     console.log('Case object:', caseObj);
     if (caseObj) {
       activeCaseId = caseObj.id;
-      resetProgressUI();
+      restoreProgressUI(caseObj.id);
       const data = await API.fetchProtected(`cases/${caseObj.id}`);
+      if (data && data.id) {
+        caseNameById.set(data.id, data.name || caseObj.name || `Case ${data.id}`);
+      }
       await showTranscriptPreview(data);
       startStatusPolling(caseObj.id);
       if (paragraphParam !== null) {
@@ -854,8 +1410,8 @@ function showNotification(message, type = 'success') {
           if (paragraphs[index]) {
             paragraphs[index].scrollIntoView({ behavior: 'smooth', block: 'center' });
             const start = paragraphs[index].dataset.start;
-            if (audio && start) {
-              audio.currentTime = parseFloat(start);
+            if (start) {
+              setAudioCurrentTime(parseFloat(start));
             }
           }
         }, 400); // Wait for transcript to render
@@ -875,10 +1431,14 @@ function showNotification(message, type = 'success') {
 let progressTimer = null;
 let currentStage = null;
 let progressWidth = 0;
-function setStage(status, counts){
+function setStage(caseId, status, counts = {}, options = {}) {
+  if (!status) return;
+  const { instant = false, widthOverride = null, skipPersist = false } = options;
   const label = document.getElementById('alignLabel');
   const bar = document.getElementById('alignProgress');
   const wrap = document.getElementById('alignStatus');
+  if (!bar || !wrap) return;
+
   const targets = { queued: 5, converting: 18, splitting: 20, aligning: 85, building: 95 };
   const texts = {
     queued: 'Queued',
@@ -887,78 +1447,116 @@ function setStage(status, counts){
     aligning: 'Aligning transcript…',
     building: 'Finalizing…',
     failed: 'Failed',
-    done: 'Ready'
+    done: 'Ready to review'
   };
-  if (status === 'done') {
-    if (wrap) wrap.style.display = 'none';
-    if (bar) { bar.style.width = '100%'; bar.classList.remove('active'); bar.classList.add('ready'); }
-    if (label) label.textContent = texts[status];
-    if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
-    progressWidth = 100;
-    currentStage = null;
-    return;
-  }
-  if (status === 'failed') {
-    if (wrap) wrap.style.display = 'block';
-    if (bar) { bar.style.width = '100%'; bar.classList.remove('active','ready'); bar.classList.add('failed'); }
-    if (label) label.textContent = texts[status];
-    if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
-    progressWidth = 100;
-    currentStage = null;
-    return;
-  }
-  // Show wrapper and animate within stage bounds
-  if (wrap) wrap.style.display = 'block';
-  if (label) {
+  const clampWidth = (value) => Math.max(0, Math.min(100, value));
+  const prev = getCaseProgress(caseId);
+  const prevStatus = prev && prev.status;
+  const cleanedCounts = (counts && (counts.total_chunks || counts.completed_chunks)) ? {
+    total_chunks: Number(counts.total_chunks) || 0,
+    completed_chunks: Number(counts.completed_chunks) || 0
+  } : null;
+
+  const updateLabel = () => {
+    if (!label) return;
     if (status === 'aligning' && counts && counts.total_chunks) {
       const cur = Math.min(counts.completed_chunks || 0, counts.total_chunks);
       label.textContent = `Aligning chunk ${cur}/${counts.total_chunks}`;
     } else {
       label.textContent = texts[status] || 'Working…';
     }
-  }
-  if (!bar) return;
-  bar.classList.remove('failed','ready');
-  bar.classList.add('active');
-  const target = targets[status] || 90;
-  if (currentStage !== status) {
-    currentStage = status;
-    if (progressTimer) { clearInterval(progressTimer); }
-    const est = window.__ls_progress_est_ms || 120000; // 2 min default
-    const tick = 300;
-    const step = (95 / (est / tick)); // reach ~95% over est time
-    progressTimer = setInterval(()=>{
-      // Monotonic increase toward current stage target (or chunk-based)
-      let dynamicTarget = target;
-      if (status === 'aligning' && counts && counts.total_chunks) {
-        const r = Math.min(1, Math.max(0, (counts.completed_chunks || 0) / counts.total_chunks));
-        dynamicTarget = 20 + 65 * r; // 20%..85%
+  };
+
+  if (status === 'done' || status === 'failed') {
+    const caseName = caseNameById.get(caseId);
+    if (wrap) wrap.style.display = status === 'failed' ? 'flex' : 'none';
+    if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+    currentStage = null;
+    bar.classList.remove('active', 'failed', 'ready');
+    if (status === 'failed') {
+      bar.classList.add('failed');
+    } else {
+      bar.classList.add('ready');
+    }
+    const width = clampWidth(widthOverride != null ? widthOverride : 100);
+    progressWidth = width;
+    bar.style.width = width + '%';
+    updateLabel();
+    if (!skipPersist) {
+      persistCaseProgress(caseId, {
+        status,
+        progress: width,
+        counts: cleanedCounts,
+        updatedAt: Date.now()
+      });
+      if (status === 'done' && prevStatus !== 'done') {
+        recordCaseReady(caseId, caseName);
       }
-      const cur = progressWidth || (parseFloat(bar.style.width || '0') || 0);
+    }
+    return;
+  }
+
+  if (progressTimer && currentStage !== status) {
+    clearInterval(progressTimer);
+    progressTimer = null;
+  }
+  if (wrap) wrap.style.display = 'flex';
+
+  currentStage = status;
+  bar.classList.remove('failed', 'ready');
+  bar.classList.add('active');
+  updateLabel();
+
+  if (instant) {
+    const width = clampWidth(widthOverride != null ? widthOverride : (prev && prev.status === status ? prev.progress : (targets[status] || 0)));
+    progressWidth = width;
+    bar.style.width = width + '%';
+  } else if (!progressTimer) {
+    const tick = 300;
+    const est = window.__ls_progress_est_ms || 120000; // default 2 minutes
+    const step = (95 / (est / tick));
+    progressTimer = setInterval(() => {
+      let dynamicTarget = targets[status] || 90;
+      if (status === 'aligning' && counts && counts.total_chunks) {
+        const ratio = Math.min(1, Math.max(0, (counts.completed_chunks || 0) / counts.total_chunks));
+        dynamicTarget = 20 + 65 * ratio;
+      }
+      const cur = typeof progressWidth === 'number' && progressWidth > 0
+        ? progressWidth
+        : (parseFloat(bar.style.width || '0') || 0);
       const next = Math.min(cur + step, dynamicTarget);
       progressWidth = next;
       bar.style.width = next + '%';
     }, tick);
+  }
+
+  if (!skipPersist) {
+    const storedWidth = clampWidth(progressWidth || parseFloat(bar.style.width || '0') || 0);
+    persistCaseProgress(caseId, {
+      status,
+      progress: storedWidth,
+      counts: cleanedCounts,
+      updatedAt: Date.now()
+    });
   }
 }
 
 let statusInterval = null;
 function startStatusPolling(caseId) {
   clearInterval(statusInterval);
-  // immediate tick
-  (async () => {
+  const allowed = { queued:1, converting:1, splitting:1, aligning:1, building:1, done:1, failed:1 };
+
+  let pollingActive = true;
+  const tickStatus = async () => {
     try {
       const s = await API.getCaseStatus(caseId);
-      const allowed = { queued:1, converting:1, splitting:1, aligning:1, building:1 };
-      if (s && s.status && allowed[s.status]) setStage(s.status, { total_chunks: s.total_chunks, completed_chunks: s.completed_chunks }); else resetProgressUI();
-    } catch(_){}
-  })();
-  statusInterval = setInterval(async () => {
-    try {
-      const s = await API.getCaseStatus(caseId);
-      const allowed = { queued:1, converting:1, splitting:1, aligning:1, building:1 };
-      if (s && s.status && allowed[s.status]) setStage(s.status, { total_chunks: s.total_chunks, completed_chunks: s.completed_chunks }); else resetProgressUI();
-      if (s.status === 'done' || s.status === 'failed') {
+      if (s && s.status && allowed[s.status]) {
+        setStage(caseId, s.status, { total_chunks: s.total_chunks, completed_chunks: s.completed_chunks });
+      } else {
+        resetProgressUI();
+      }
+      if (s && (s.status === 'done' || s.status === 'failed')) {
+        pollingActive = false;
         clearInterval(statusInterval);
         if (s.status === 'done' && activeCaseId === caseId) {
           try {
@@ -968,5 +1566,10 @@ function startStatusPolling(caseId) {
         }
       }
     } catch (_) {}
-  }, 1500);
+  };
+
+  tickStatus().then(() => {
+    if (!pollingActive) return;
+    statusInterval = setInterval(() => { tickStatus(); }, 1500);
+  });
 }

@@ -106,6 +106,29 @@ class LegalSyncAPI {
         return response.json();
     }
 
+    async downloadExternalComments(caseId, format = 'docx') {
+        const response = await fetch(this.baseUrl + `/cases/${caseId}/external-comments?format=${encodeURIComponent(format)}`, {
+            headers: {
+                'Authorization': `Bearer ${sessionStorage.getItem('legalSyncToken')}`,
+            },
+        });
+        if (!response.ok) {
+            let message = 'Failed to export external comments';
+            try {
+                const errorData = await response.json();
+                if (errorData && (errorData.error || errorData.message)) {
+                    message = errorData.error || errorData.message;
+                }
+            } catch (_) {
+                // ignore parsing errors
+            }
+            const error = new Error(message);
+            error.status = response.status;
+            throw error;
+        }
+        return response;
+    }
+
     async postProtected(url, options = {}) {
         const path = url.startsWith('/') ? url : `/${url}`;
         const headers = {

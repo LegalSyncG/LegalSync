@@ -102,6 +102,23 @@
   min-height: 0;
 }
 
+.page-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 18px 0 6px;
+  padding: 4px 12px;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #4b5fb2;
+  background: rgba(231, 236, 250, 0.6);
+  border-radius: 999px;
+  border-left: 3px solid #4b5fb2;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
     .entry-box {
       border-bottom: 1px solid #ddd;
       margin-bottom: 15px;

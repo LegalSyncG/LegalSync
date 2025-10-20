@@ -28,25 +28,50 @@
 
     <main class="content">
       <div id="transcriptPreview" class="transcript-preview" style="display: none;">
-  <h3>Transcript Preview</h3>
-
-
-  <pre id="transcriptText"
-       style="max-height: 300px; overflow-y: auto; white-space: pre-wrap; background: #f9f9f9; padding: 10px; border: 1px solid #ccc;">
-    Transcript text will appear here...
-  </pre>
-
-  <audio id="transcriptAudio" controls style="width: 100%; margin-top: 10px;">
-    <source id="audioSource" src="" type="audio/mpeg">
-    Your browser does not support the audio element.
-  </audio>
-  <div id="alignStatus" class="align-status" aria-live="polite" style="margin-top:10px;">
-    <div class="progress">
-      <div class="progress-bar" id="alignProgress" style="width:0%"></div>
-    </div>
-    <div id="alignLabel" class="align-label">Waiting…</div>
-  </div>
-</div>
+        <div class="preview-header">
+          <div>
+            <h3>Transcript Preview</h3>
+            <p class="preview-subtitle">Monitor alignment progress, listen back, and spot flagged passages instantly.</p>
+          </div>
+        </div>
+        <div class="preview-body">
+          <div class="preview-text">
+            <div id="transcriptText" class="transcript-text-placeholder">Transcript text will appear here...</div>
+          </div>
+          <div class="preview-audio">
+            <audio id="transcriptAudio">
+              <source id="audioSource" src="" type="audio/mpeg">
+              Your browser does not support the audio element.
+            </audio>
+            <div class="audio-controls" role="group" aria-label="Transcript audio controls">
+              <button type="button" id="audioPlayPause" class="audio-btn">Play</button>
+              <div class="audio-timeline">
+                <span id="audioCurrentTime" class="audio-time">0:00</span>
+                <input type="range" id="audioSeek" min="0" max="0" value="0" step="0.1" disabled />
+                <span id="audioDuration" class="audio-time">0:00</span>
+              </div>
+              <label class="audio-speed" for="audioSpeed">
+                <span class="sr-only">Playback speed</span>
+                <select id="audioSpeed" aria-label="Playback speed">
+                  <option value="0.75">0.75×</option>
+                  <option value="0.9">0.90×</option>
+                  <option value="1" selected>1.0×</option>
+                  <option value="1.25">1.25×</option>
+                  <option value="1.5">1.50×</option>
+                  <option value="1.75">1.75×</option>
+                  <option value="2">2.00×</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div id="alignStatus" class="align-status" aria-live="polite">
+            <div class="progress">
+              <div class="progress-bar" id="alignProgress" style="width:0%"></div>
+            </div>
+            <div id="alignLabel" class="align-label">Waiting…</div>
+          </div>
+        </div>
+      </div>
 
 
 
@@ -78,9 +103,9 @@
           <span id="audioFileName" class="file-name">No file chosen</span>
         </div>
 
-        <label>Transcript (TXT) — or paste below</label>
+        <label>Transcript (TXT, DOCX, or Pages) — or paste below</label>
         <div class="file-picker">
-          <input id="caseTranscriptFile" type="file" accept="text/plain" hidden />
+          <input id="caseTranscriptFile" type="file" accept=".txt,.docx,.pages,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.apple.pages,text/plain" hidden />
           <button type="button" id="pickTranscript" class="view-btn light">Choose file</button>
           <span id="transcriptFileName" class="file-name">No file chosen</span>
         </div>
