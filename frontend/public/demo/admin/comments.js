@@ -128,7 +128,453 @@
     let segmentGuard = { enabled: false, end: 0 };
     let currentlyPlayingIndex = null;
 
+    // Alignment-derived helpers
+    const LETTER_REGEX = /\p{L}/u;
+    const NUMBER_CHARS = new Set(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '.', ',', '-', '–', '—', '·']);
+    let partsTimesGlobal = [];
+    let wordPartRangesByEntry = [];
+    let wordLocationsByEntry = [];
+
     initReadyNotifications();
+
+    function isLetterChar(ch) {
+      return LETTER_REGEX.test(ch);
+    }
+
+    function isNumberChar(ch) {
+      return NUMBER_CHARS.has(ch);
+    }
+
+    function isDigitChar(ch) {
+      return ch >= '0' && ch <= '9';
+    }
+
+    function splitPartsWithPositions(text = '') {
+      const parts = [];
+      let buffer = '';
+      let bufferStart = 0;
+      let mode = null; // 'alpha' | 'num' | null
+
+      const flush = () => {
+        if (!buffer) return;
+        parts.push({ value: buffer, start: bufferStart, end: bufferStart + buffer.length });
+        buffer = '';
+      };
+
+      for (let i = 0; i < text.length; i += 1) {
+        const ch = text[i];
+        if (isLetterChar(ch) || ch === "'") {
+          if (mode !== 'alpha') {
+            flush();
+            mode = 'alpha';
+            bufferStart = i;
+          }
+          buffer += ch;
+        } else if (isNumberChar(ch)) {
+          if (mode !== 'num') {
+            flush();
+            mode = 'num';
+            bufferStart = i;
+          }
+          buffer += ch;
+        } else {
+          flush();
+          mode = null;
+          parts.push({ value: ch, start: i, end: i + 1 });
+        }
+      }
+
+      const flushFinal = () => {
+        if (!buffer) return;
+        parts.push({ value: buffer, start: bufferStart, end: bufferStart + buffer.length });
+        buffer = '';
+      };
+
+      flushFinal();
+      return parts;
+    }
+
+    function extractUiWordsWithPositions(text = '') {
+      const result = [];
+      const re = /\S+/g;
+      let match;
+      while ((match = re.exec(text)) !== null) {
+        result.push({
+          value: match[0],
+          start: match.index,
+          end: match.index + match[0].length,
+        });
+      }
+      return result;
+    }
+
+    function isWordPartValue(value) {
+      if (!value) return false;
+      for (const ch of value) {
+        if (isLetterChar(ch) || isDigitChar(ch)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function normalizeTokenValue(token) {
+      let out = '';
+      for (const ch of token || '') {
+        if (isLetterChar(ch) || isDigitChar(ch)) {
+          out += ch.toLowerCase();
+        }
+      }
+      return out;
+    }
+
+    function extractRawTokensWithLineInfo(text = '') {
+      const tokens = [];
+      let idx = 0;
+      let page = 1;
+      let line = 0;
+      let linePending = true;
+      let wordInLine = 0;
+
+      while (idx < text.length) {
+        const ch = text[idx];
+        if (ch === '\f') {
+          page += 1;
+          line = 0;
+          wordInLine = 0;
+          linePending = true;
+          idx += 1;
+          continue;
+        }
+        if (ch === '\r') {
+          idx += 1;
+          continue;
+        }
+        if (ch === '\n') {
+          linePending = true;
+          wordInLine = 0;
+          idx += 1;
+          continue;
+        }
+        if (/\s/.test(ch)) {
+          idx += 1;
+          continue;
+        }
+
+        const start = idx;
+        while (idx < text.length) {
+          const c = text[idx];
+          if (c === '\f' || c === '\n' || c === '\r' || /\s/.test(c)) break;
+          idx += 1;
+        }
+        const value = text.slice(start, idx);
+        if (!value) continue;
+
+        if (linePending) {
+          line += 1;
+          linePending = false;
+        }
+
+        const normalized = normalizeTokenValue(value);
+        let wordNumber = null;
+        if (normalized) {
+          wordInLine += 1;
+          wordNumber = wordInLine;
+        }
+
+        tokens.push({
+          value,
+          normalized,
+          page,
+          line,
+          wordInLine: wordNumber,
+        });
+      }
+
+      return tokens;
+    }
+
+    function buildWordLocations(entries, rawTranscript) {
+      const locations = entries.map(() => []);
+      if (typeof rawTranscript !== 'string') {
+        return locations;
+      }
+
+      const rawTokens = extractRawTokensWithLineInfo(rawTranscript);
+      let rawIdx = 0;
+
+      entries.forEach((entry, entryIndex) => {
+        const words = extractUiWordsWithPositions(entry?.text || '');
+        const entryLocations = locations[entryIndex];
+        const entryPage = Number.isFinite(Number(entry?.page)) ? Number(entry.page) : null;
+        let lastKnownLocation = null;
+
+        words.forEach(({ value }, ordinal) => {
+          const normalized = normalizeTokenValue(value);
+          if (!normalized) {
+            entryLocations[ordinal] = lastKnownLocation;
+            return;
+          }
+
+          let matched = null;
+          while (rawIdx < rawTokens.length) {
+            const candidate = rawTokens[rawIdx];
+            rawIdx += 1;
+            if (!candidate.normalized) {
+              continue;
+            }
+            matched = candidate;
+            break;
+          }
+
+          if (!matched) {
+            entryLocations[ordinal] = lastKnownLocation;
+            return;
+          }
+
+          const page = entryPage ?? matched.page ?? 1;
+          const line = matched.line ?? null;
+          const wordInLine = matched.wordInLine ?? null;
+          const loc = { page, line, wordInLine };
+          entryLocations[ordinal] = loc;
+          lastKnownLocation = loc;
+        });
+      });
+
+      return locations;
+    }
+
+    function sanitizeStoredWordLocation(raw, fallbackPage) {
+      if (!raw || typeof raw !== 'object') return null;
+      const pageCandidate = Number(raw.page ?? raw.page_number ?? raw.p ?? raw.pg);
+      const lineCandidate = Number(raw.line_on_page ?? raw.line ?? raw.lineNumber ?? raw.l);
+      const wordCandidate = Number(raw.word_in_line ?? raw.wordInLine ?? raw.word ?? raw.w);
+      const page = Number.isFinite(pageCandidate)
+        ? pageCandidate
+        : Number.isFinite(fallbackPage)
+          ? fallbackPage
+          : null;
+      const line = Number.isFinite(lineCandidate) ? lineCandidate : null;
+      const wordInLine = Number.isFinite(wordCandidate) ? wordCandidate : null;
+      return { page, line, wordInLine };
+    }
+
+    function prepareAlignmentMetadata(entries, alignmentPayload, rawTranscript) {
+      partsTimesGlobal = Array.isArray(alignmentPayload?.mapped?.parts_times)
+        ? alignmentPayload.mapped.parts_times
+        : [];
+      wordPartRangesByEntry = [];
+      wordLocationsByEntry = [];
+
+      let cumulativeParts = 0;
+
+      entries.forEach((entry, entryIndex) => {
+        const parts = splitPartsWithPositions(entry?.text || '');
+        const words = extractUiWordsWithPositions(entry?.text || '');
+        const ranges = [];
+        let partCursor = 0;
+
+        words.forEach(({ start, end }) => {
+          while (partCursor < parts.length && parts[partCursor].end <= start) {
+            partCursor += 1;
+          }
+          let first = null;
+          let last = null;
+          let idx = partCursor;
+          while (idx < parts.length && parts[idx].start < end) {
+            if (isWordPartValue(parts[idx].value)) {
+              const globalIdx = cumulativeParts + idx;
+              if (first === null) first = globalIdx;
+              last = globalIdx;
+            }
+            idx += 1;
+          }
+          ranges.push({ first, last });
+          partCursor = idx;
+        });
+
+        wordPartRangesByEntry[entryIndex] = ranges;
+
+        cumulativeParts += parts.length;
+      });
+
+      const fallbackWordLocations = buildWordLocations(entries, rawTranscript);
+      wordLocationsByEntry = fallbackWordLocations.map((locs) => Array.isArray(locs) ? [...locs] : []);
+
+      entries.forEach((entry, entryIndex) => {
+        const provided = Array.isArray(entry?.word_locations) ? entry.word_locations : null;
+        if (!provided || !provided.length) {
+          return;
+        }
+        const entryPage = Number.isFinite(Number(entry?.page)) ? Number(entry.page) : null;
+        const sanitized = provided.map((loc) => sanitizeStoredWordLocation(loc, entryPage));
+        const hasData = sanitized.some((loc) => loc !== null);
+        if (!hasData) return;
+
+        // Ensure length matches the number of words; otherwise fall back.
+        const expectedLength = extractUiWordsWithPositions(entry?.text || '').length;
+        if (sanitized.length === expectedLength) {
+          wordLocationsByEntry[entryIndex] = sanitized;
+        }
+      });
+    }
+
+    function resolveBoundaryTime(globalPartIndex, boundary) {
+      if (
+        globalPartIndex == null ||
+        !Array.isArray(partsTimesGlobal) ||
+        globalPartIndex < 0 ||
+        globalPartIndex >= partsTimesGlobal.length
+      ) {
+        return null;
+      }
+      const record = partsTimesGlobal[globalPartIndex];
+      const direct = record && Number.isFinite(record[boundary]) ? Number(record[boundary]) : null;
+      if (direct != null) {
+        return direct;
+      }
+
+      let prev = null;
+      for (let i = globalPartIndex - 1; i >= 0; i -= 1) {
+        const candidate = partsTimesGlobal[i];
+        if (!candidate) continue;
+        if (Number.isFinite(candidate[boundary])) {
+          prev = Number(candidate[boundary]);
+          break;
+        }
+        if (Number.isFinite(candidate.end)) {
+          prev = Number(candidate.end);
+          break;
+        }
+        if (Number.isFinite(candidate.start)) {
+          prev = Number(candidate.start);
+          break;
+        }
+      }
+
+      let next = null;
+      for (let i = globalPartIndex + 1; i < partsTimesGlobal.length; i += 1) {
+        const candidate = partsTimesGlobal[i];
+        if (!candidate) continue;
+        if (Number.isFinite(candidate[boundary])) {
+          next = Number(candidate[boundary]);
+          break;
+        }
+        if (Number.isFinite(candidate.start)) {
+          next = Number(candidate.start);
+          break;
+        }
+        if (Number.isFinite(candidate.end)) {
+          next = Number(candidate.end);
+          break;
+        }
+      }
+
+      if (prev != null && next != null) {
+        return (prev + next) / 2;
+      }
+      return prev ?? next ?? null;
+    }
+
+    function formatTimestamp(seconds) {
+      if (!Number.isFinite(seconds)) return null;
+      const sign = seconds < 0 ? '-' : '';
+      const abs = Math.abs(seconds);
+      const hours = Math.floor(abs / 3600);
+      const minutes = Math.floor((abs % 3600) / 60);
+      const secs = abs % 60;
+      const secStr = secs.toFixed(2).padStart(5, '0');
+      if (hours > 0) {
+        return `${sign}${hours}:${String(minutes).padStart(2, '0')}:${secStr}`;
+      }
+      return `${sign}${String(minutes).padStart(2, '0')}:${secStr}`;
+    }
+
+    function formatTimeRange(start, end) {
+      const startStr = formatTimestamp(start);
+      const endStr = formatTimestamp(end);
+      if (startStr && endStr) {
+        if (startStr === endStr) return startStr;
+        return `${startStr} – ${endStr}`;
+      }
+      return startStr || endStr || null;
+    }
+
+    function getWordLocationMeta(entryIndex, ordinal) {
+      if (ordinal == null || !Number.isInteger(ordinal) || ordinal < 0) return null;
+      const locations = wordLocationsByEntry[entryIndex];
+      if (!locations) return null;
+      return locations[ordinal] || null;
+    }
+
+    function getWordRangeTimes(entryIndex, startOrd, endOrd) {
+      const ranges = wordPartRangesByEntry[entryIndex];
+      if (!ranges || ranges.length === 0) {
+        return { start: null, end: null };
+      }
+      const safeStart = Math.max(0, Math.min(startOrd, ranges.length - 1));
+      const safeEnd = Math.max(0, Math.min(endOrd, ranges.length - 1));
+      const startRange = ranges[safeStart];
+      const endRange = ranges[safeEnd];
+      const startTime = resolveBoundaryTime(startRange?.first ?? null, 'start');
+      const endTime = resolveBoundaryTime(endRange?.last ?? null, 'end');
+      return { start: startTime, end: endTime };
+    }
+
+    function formatLocationSummary(entryIndex, startOrd, endOrd, entry) {
+      const startLoc = getWordLocationMeta(entryIndex, startOrd);
+      const endLoc = getWordLocationMeta(entryIndex, endOrd);
+      const fallbackPage = Number.isFinite(Number(entry?.page)) ? Number(entry.page) : null;
+      const fallbackLine = Number.isFinite(Number(entry?.line_on_page)) ? Number(entry.line_on_page) : null;
+
+      const startPage = startLoc?.page ?? fallbackPage;
+      const endPage = endLoc?.page ?? startPage ?? fallbackPage;
+      let pageLabel = null;
+      if (startPage != null && endPage != null) {
+        pageLabel = startPage === endPage ? `Page ${startPage}` : `Pages ${startPage}–${endPage}`;
+      } else if (startPage != null) {
+        pageLabel = `Page ${startPage}`;
+      } else if (endPage != null) {
+        pageLabel = `Page ${endPage}`;
+      }
+
+      const startLine = startLoc?.line ?? fallbackLine;
+      const endLine = endLoc?.line ?? startLine ?? fallbackLine;
+      let lineLabel = null;
+      if (startLine != null && endLine != null) {
+        lineLabel = startLine === endLine ? `Line ${startLine}` : `Lines ${startLine}–${endLine}`;
+      } else if (startLine != null) {
+        lineLabel = `Line ${startLine}`;
+      } else if (endLine != null) {
+        lineLabel = `Line ${endLine}`;
+      }
+
+      const startWord = startLoc?.wordInLine ?? null;
+      const endWord = endLoc?.wordInLine ?? startWord;
+      let wordsLabel = null;
+      if (startWord != null && endWord != null) {
+        if (startLine != null && endLine != null && startLine !== endLine) {
+          wordsLabel = `Words ${startWord}@L${startLine}–${endWord}@L${endLine}`;
+        } else {
+          wordsLabel = startWord === endWord ? `Word ${startWord}` : `Words ${startWord}–${endWord}`;
+        }
+      } else if (startWord != null) {
+        wordsLabel = `Word ${startWord}`;
+      } else if (endWord != null) {
+        wordsLabel = `Word ${endWord}`;
+      }
+
+      const bits = [];
+      if (pageLabel) bits.push(pageLabel);
+      if (lineLabel) bits.push(lineLabel);
+      if (wordsLabel) {
+        bits.push(wordsLabel);
+      } else {
+        bits.push(`Words ${startOrd + 1}-${endOrd + 1}`);
+      }
+
+      return bits.join(' • ');
+    }
 
     function configureAudioForCase(caseData) {
       if (!paragraphAudio || !caseData) return;
@@ -344,13 +790,22 @@
       try {
         showNotification("Loading transcript...", "success");
         const caseData = await API.fetchProtected(`cases/${caseId}`);
-        const transcriptRes = await API.fetchProtected(`/text/${caseData.text_file}`);
         currentCaseName = caseData.name || currentCaseName || '';
         if (!startStatusWatcher._started) {
           startStatusWatcher(caseId, currentCaseName);
           startStatusWatcher._started = true;
         }
+
+        const [transcriptRes, alignmentRes, rawTranscriptRes] = await Promise.all([
+          API.fetchProtected(`/text/${caseData.text_file}`),
+          API.getCaseAlignment(caseId).catch(() => null),
+          API.getCaseTranscript(caseId).catch(() => null),
+        ]);
+
         transcriptData = JSON.parse(transcriptRes.content);
+        const rawTranscriptText = typeof rawTranscriptRes?.text === 'string' ? rawTranscriptRes.text : null;
+        prepareAlignmentMetadata(transcriptData, alignmentRes, rawTranscriptText);
+
         configureAudioForCase(caseData);
         renderComments(transcriptData);
 
@@ -361,7 +816,7 @@
           if (entryBox) {
             setTimeout(() => {
               entryBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            }, 100); // W
+            }, 100);
           }
         }
       } catch (error) {
@@ -608,7 +1063,10 @@
       const section = document.getElementById('selectedCommentSection');
       const para = container.querySelector(`.entry-box[data-entry-index="${entryIndex}"]`);
       if (!para) return;
-      const target = para.querySelector(`.word[data-word-index="${wordIndex}"]`);
+      let target = para.querySelector(`.word[data-word-ordinal="${wordIndex}"]`);
+      if (!target) {
+        target = para.querySelector(`.word[data-word-index="${wordIndex}"]`);
+      }
       if (!target) return;
       const scrollerRect = scroller.getBoundingClientRect();
       const targetRect = target.getBoundingClientRect();
@@ -969,18 +1427,71 @@
           if (activeComment && activeComment.entryIndex === entryIndex && activeComment.commentIndex === i) {
             div.classList.add('active');
           }
+          const startWordRaw = Number.parseInt(comment.start_word, 10);
+          const endWordRaw = Number.parseInt(comment.end_word, 10);
+          const safeStart = Number.isFinite(startWordRaw) ? startWordRaw : 0;
+          const safeEnd = Number.isFinite(endWordRaw) ? endWordRaw : safeStart;
+          const wordStart = Math.min(safeStart, safeEnd);
+          const wordEnd = Math.max(safeStart, safeEnd);
+
           div.dataset.entryIndex = entryIndex;
           div.dataset.commentIndex = i;
-          div.dataset.startWord = comment.start_word;
+          div.dataset.startWord = wordStart;
 
-          const p = document.createElement('p');
-          const paragraphLabel = `Paragraph ${entryIndex + 1}, words ${comment.start_word + 1}-${comment.end_word + 1}`;
-          p.innerHTML = `
-            <strong>${paragraphLabel}</strong><br>
-            ${comment.internal_comment ? `<em>Internal:</em> ${comment.internal_comment}<br>` : ''}
-            ${comment.external_comment ? `<em>External:</em> ${comment.external_comment}` : ''}
-          `;
-          div.appendChild(p);
+          const body = document.createElement('div');
+          body.className = 'comment-body';
+
+          if (comment.internal_comment) {
+            const internalP = document.createElement('p');
+            const internalLabel = document.createElement('span');
+            internalLabel.className = 'comment-label';
+            internalLabel.textContent = 'Internal:';
+            internalP.appendChild(internalLabel);
+            internalP.appendChild(document.createTextNode(` ${comment.internal_comment}`));
+            body.appendChild(internalP);
+          }
+
+          if (comment.external_comment) {
+            const externalP = document.createElement('p');
+            const externalLabel = document.createElement('span');
+            externalLabel.className = 'comment-label';
+            externalLabel.textContent = 'External:';
+            externalP.appendChild(externalLabel);
+            externalP.appendChild(document.createTextNode(` ${comment.external_comment}`));
+            body.appendChild(externalP);
+          }
+
+          if (!comment.internal_comment && !comment.external_comment) {
+            const emptyP = document.createElement('p');
+            emptyP.textContent = '(No comment text)';
+            body.appendChild(emptyP);
+          }
+
+          const locationText = formatLocationSummary(entryIndex, wordStart, wordEnd, entry);
+
+          const { start: rangeStart, end: rangeEnd } = getWordRangeTimes(entryIndex, wordStart, wordEnd);
+          const timeText = formatTimeRange(rangeStart, rangeEnd);
+
+          const meta = document.createElement('div');
+          meta.className = 'comment-meta';
+
+          const locationLine = document.createElement('div');
+          locationLine.className = 'comment-meta__location';
+          locationLine.textContent = locationText;
+          meta.appendChild(locationLine);
+
+          const timeLine = document.createElement('div');
+          timeLine.className = 'comment-meta__time';
+          if (timeText) {
+            timeLine.textContent = timeText;
+          } else {
+            timeLine.textContent = 'Timestamp unavailable';
+            timeLine.classList.add('is-muted');
+          }
+          meta.appendChild(timeLine);
+
+          div.appendChild(body);
+          div.appendChild(meta);
 
           // Kebab icon and contextual menu
           const kebab = document.createElement('div');
@@ -1020,7 +1531,7 @@
           div.addEventListener('click', () => {
             activeComment = { entryIndex, commentIndex: i };
             updateCommentPanel();
-            highlightWordRange(entryIndex, comment.start_word, comment.end_word);
+            highlightWordRange(entryIndex, wordStart, wordEnd);
             const para = container.querySelector(`.entry-box[data-entry-index="${entryIndex}"]`);
             if (para) {
               para.scrollIntoView({ behavior: 'smooth', block: 'center' });

@@ -711,18 +711,29 @@ function isSupportedTranscriptFile(file) {
       audio.addEventListener('timeupdate', () => {
         const current = getAudioCurrentTime(audio);
         const spans = container.querySelectorAll('.word');
-        let active = null;
-        for (const el of spans) {
+        const EPS = 1e-3;
+        let activeIndex = -1;
+        for (let i = 0; i < spans.length; i++) {
+          const el = spans[i];
           const s = parseFloat(el.dataset.start);
           const e = parseFloat(el.dataset.end);
-          if (!isNaN(s) && !isNaN(e) && current >= s && current <= e) {
-            active = el;
+          if (Number.isNaN(s) || Number.isNaN(e)) continue;
+          const isLast = i === spans.length - 1;
+          const inRange = current >= s && (isLast ? current <= e + EPS : current < e - EPS);
+          if (inRange) {
+            activeIndex = i;
+            break;
+          }
+        }
+        spans.forEach((el, idx) => {
+          if (idx === activeIndex) {
             el.classList.add('highlighted');
           } else {
             el.classList.remove('highlighted');
           }
-        }
-        if (active) {
+        });
+        if (activeIndex >= 0) {
+          const active = spans[activeIndex];
           try { active.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (_) {}
         }
       });
@@ -734,7 +745,26 @@ function isSupportedTranscriptFile(file) {
       if (!container) return;
       container.innerHTML = '';
       // Split transcript into word and non-word segments, preserving exact punctuation and newlines
-      const parts = transcriptTextRaw.split(/([\p{L}']+|[0-9][0-9.,–—-]*)/u);
+      // Prefer the exact `mapped.parts` sent by backend (list) to ensure identical tokenization.
+      let parts = [];
+      if (mapped && Array.isArray(mapped.parts) && mapped.parts.length) {
+        parts = mapped.parts;
+      } else {
+        // Fallback: prefer backend-provided split_regex when available to ensure frontend/backend use the same tokenization.
+        try {
+          const backendRegex = mapped && mapped.split_regex ? mapped.split_regex : null;
+          if (backendRegex) {
+            // backendRegex arrives as a string suitable for RegExp constructor (escape sequences preserved in JSON)
+            const re = new RegExp(backendRegex, 'u');
+            parts = transcriptTextRaw.split(re);
+          } else {
+            parts = transcriptTextRaw.split(/([\p{L}']+|[0-9][0-9.,–—-]*)/u);
+          }
+        } catch (e) {
+          // Fallback to the built-in pattern on any error
+          parts = transcriptTextRaw.split(/([\p{L}']+|[0-9][0-9.,–—-]*)/u);
+        }
+      }
       const norm = (s) => (s || '').toLocaleLowerCase().normalize('NFC').replace(/[^\p{L}']+/gu, '');
       const rnorm = words.map(w => norm(w.word));
       const NUM = {0:'zero',1:'one',2:'two',3:'three',4:'four',5:'five',6:'six',7:'seven',8:'eight',9:'nine'};
@@ -850,12 +880,14 @@ function isSupportedTranscriptFile(file) {
         return out;
       }
 
-      // If backend provided precise timings per split-part, prefer them
+      // If backend provided precise timings per split-part, use them when present,
+      // but always compute a client-side token mapping as a fallback for parts
+      // where the backend did not provide start/end timestamps.
       let backendPartTimes = null;
       if (mapped && mapped.parts_times && Array.isArray(mapped.parts_times) && mapped.parts_times.length === parts.length) {
         backendPartTimes = mapped.parts_times;
       }
-      const mapping = backendPartTimes ? null : alignBlocks(Tnorm, rnorm);
+      const mapping = alignBlocks(Tnorm, rnorm);
 
       // Render by consuming mapping tokens in order and aggregating over number groups
       let tokPtr = 0;
@@ -863,14 +895,22 @@ function isSupportedTranscriptFile(file) {
         if (!part) return;
         if (/^[\p{L}']+$/u.test(part)) {
           let s = undefined, e = undefined, mismatch = false;
+          // Prefer backend times when available and complete; otherwise fall back to client mapping.
+          let usedBackend = false;
           if (backendPartTimes) {
             const t = backendPartTimes[idx];
-            if (t && t.start != null && t.end != null) { s = t.start; e = t.end; } else { mismatch = true; }
-          } else {
+            if (t && t.start != null && t.end != null) { s = t.start; e = t.end; usedBackend = true; }
+          }
+          if (!usedBackend) {
             const j = tokPtr < mapping.length ? mapping[tokPtr++] : -1;
             const w = (j >= 0 ? words[j] : {}) || {};
             s = w.start; e = w.end;
             mismatch = (j < 0) || (norm(part) !== (j >= 0 ? rnorm[j] : ''));
+          } else {
+            // backend provided valid times -> consider it a match
+            mismatch = false;
+            // still advance token pointer to keep alignment with transcript tokens
+            tokPtr += 1;
           }
           const span = document.createElement('span');
           span.className = 'word' + (mismatch ? ' mismatch' : '');
@@ -883,10 +923,13 @@ function isSupportedTranscriptFile(file) {
           container.appendChild(span);
         } else if (/^[0-9][0-9.,–—-]*$/.test(part)) {
           let s = undefined, e = undefined, mismatch = false;
+          // Prefer backend times when available and complete; otherwise fallback to client mapping.
+          let usedBackendNum = false;
           if (backendPartTimes) {
             const t = backendPartTimes[idx];
-            if (t && t.start != null && t.end != null) { s = t.start; e = t.end; } else { mismatch = true; }
-          } else {
+            if (t && t.start != null && t.end != null) { s = t.start; e = t.end; usedBackendNum = true; }
+          }
+          if (!usedBackendNum) {
             const exp = expandNumberToWords(part);
             const idxs = [];
             for (let k = 0; k < exp.length; k++) { idxs.push(tokPtr < mapping.length ? mapping[tokPtr++] : -1); }
@@ -896,6 +939,12 @@ function isSupportedTranscriptFile(file) {
             s = starts.length ? Math.min(...starts) : undefined;
             e = ends.length ? Math.max(...ends) : undefined;
             mismatch = idxs.some(j => j < 0);
+          } else {
+            // backend provided valid times -> consider it a match
+            mismatch = false;
+            // advance token pointer by expanded length so future client mappings stay aligned
+            const exp = expandNumberToWords(part);
+            tokPtr += exp.length;
           }
           const span = document.createElement('span');
           span.className = 'word number' + (mismatch ? ' mismatch' : '');
@@ -914,18 +963,29 @@ function isSupportedTranscriptFile(file) {
       audio.addEventListener('timeupdate', () => {
         const current = getAudioCurrentTime(audio);
         const spans = container.querySelectorAll('.word');
-        let active = null;
-        spans.forEach(el => {
+        const EPS = 1e-3;
+        let activeIndex = -1;
+        for (let i = 0; i < spans.length; i++) {
+          const el = spans[i];
           const s = parseFloat(el.dataset.start);
           const e = parseFloat(el.dataset.end);
-          if (!isNaN(s) && !isNaN(e) && current >= s && current <= e) {
-            active = el;
+          if (Number.isNaN(s) || Number.isNaN(e)) continue;
+          const isLast = i === spans.length - 1;
+          const inRange = current >= s && (isLast ? current <= e + EPS : current < e - EPS);
+          if (inRange) {
+            activeIndex = i;
+            break;
+          }
+        }
+        spans.forEach((el, idx) => {
+          if (idx === activeIndex) {
             el.classList.add('highlighted');
           } else {
             el.classList.remove('highlighted');
           }
         });
-        if (active) {
+        if (activeIndex >= 0) {
+          const active = spans[activeIndex];
           try { active.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (_) {}
         }
       });

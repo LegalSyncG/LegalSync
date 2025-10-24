@@ -545,7 +545,35 @@ def case_alignment(case_id: int):
     if not os.path.isfile(alignment_path):
         return jsonify({"error": "alignment not ready"}), 404
     with open(alignment_path, "r", encoding="utf-8") as f:
-        return jsonify(json.load(f))
+        payload = json.load(f)
+
+    need_refresh = False
+    mapped = payload.get("mapped") if isinstance(payload, dict) else None
+    if not isinstance(mapped, dict):
+        need_refresh = True
+    else:
+        parts_times = mapped.get("parts_times")
+        if not isinstance(parts_times, list) or not parts_times:
+            need_refresh = True
+        else:
+            stats = mapped.get("stats")
+            if not isinstance(stats, dict) or "coverage" not in stats:
+                need_refresh = True
+
+    if need_refresh:
+        transcript_txt = os.path.join(case_dir, "transcript.txt")
+        if os.path.isfile(transcript_txt):
+            try:
+                with open(transcript_txt, "r", encoding="utf-8", errors="ignore") as tf:
+                    transcript_text = tf.read()
+                words = payload.get("words") if isinstance(payload, dict) else []
+                mapped_updated = build_mapped_parts(transcript_text, words or [])
+                payload["mapped"] = mapped_updated
+                write_json(alignment_path, payload)
+            except Exception:
+                pass
+
+    return jsonify(payload)
 
 
 @cases_bp.route("/cases/<int:case_id>/transcript", methods=["GET"])
