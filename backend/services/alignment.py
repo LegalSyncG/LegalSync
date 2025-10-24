@@ -2073,59 +2073,6 @@ def build_mapped_parts(transcript_text: str, recognized_words: List[Dict[str, An
         "transcript_token_count": t_count,
         "recognized_token_count": r_count,
     }
-    # debug: include mapping for diagnostics (token index -> recognized_token index)
-    try:
-        debug_mapping = mapping
-    except Exception:
-        debug_mapping = None
-    # Additional diagnostics for repeated-token mismatches: for transcript tokens
-    # whose norm appears multiple times in recognized_tokens, record cases where
-    # the chosen mapping is far from the nearest same-norm recognized token.
-    mapping_diagnostics: List[Dict[str, Any]] = []
-    try:
-        # build norm -> list of recognized indices
-        rec_idx_by_norm: Dict[str, List[int]] = defaultdict(list)
-        for ri, rt in enumerate(recognized_tokens):
-            n = getattr(rt, 'norm', None)
-            if n:
-                rec_idx_by_norm.setdefault(n, []).append(ri)
-
-        ratio = len(recognized_tokens) / max(1, len(transcript_tokens))
-        for ti, t_tok in enumerate(transcript_tokens):
-            tnorm = getattr(t_tok, 'norm', None)
-            if not tnorm:
-                continue
-            rec_list = rec_idx_by_norm.get(tnorm, [])
-            if len(rec_list) <= 1:
-                continue
-            chosen = mapping[ti] if ti < len(mapping) else None
-            # compute nearest recognized index to predicted position
-            predicted = int(round(ti * ratio))
-            nearest = min(rec_list, key=lambda r: abs(r - predicted))
-            # flag if chosen is not nearest and distance is non-trivial
-            if chosen is None or chosen < 0:
-                mapping_diagnostics.append({
-                    'token_index': ti,
-                    'norm': tnorm,
-                    'chosen': chosen,
-                    'nearest': nearest,
-                    'rec_list': rec_list,
-                })
-            else:
-                dist_to_nearest = abs(chosen - nearest)
-                # consider alarming if distance > 6 or chosen is beyond predicted+30
-                if dist_to_nearest > 6 or chosen - predicted > 30:
-                    mapping_diagnostics.append({
-                        'token_index': ti,
-                        'norm': tnorm,
-                        'chosen': chosen,
-                        'nearest': nearest,
-                        'dist_to_nearest': dist_to_nearest,
-                        'predicted': predicted,
-                        'rec_list': rec_list,
-                    })
-    except Exception:
-        mapping_diagnostics = []
     # Include the exact `parts` sequence used by the backend so the frontend
     # can use the identical tokenization (avoids JS/Python regex incompatibilities).
     try:
@@ -2137,7 +2084,6 @@ def build_mapped_parts(transcript_text: str, recognized_words: List[Dict[str, An
         "parts": out_parts,
         "parts_times": parts_times,
         "stats": stats,
-        "mapping": debug_mapping,
     }
 
 

@@ -1,0 +1,72 @@
+{
+  "checked": 15,
+  "fixed": [
+    [
+      "uploads/personal/1/cases/31/alignment.json",
+      "no_parts",
+      "uploads/personal/1/cases/31/alignment.bak.auto.1761319047"
+    ],
+    [
+      "uploads/personal/1/cases/43/alignment.json",
+      "no_parts",
+      "uploads/personal/1/cases/43/alignment.bak.auto.1761319047"
+    ],
+    [
+      "uploads/personal/1/cases/45/alignment.json",
+      "no_parts",
+      "uploads/personal/1/cases/45/alignment.bak.auto.1761319071"
+    ],
+    [
+      "uploads/personal/1/cases/46/alignment.json",
+      "no_parts",
+      "uploads/personal/1/cases/46/alignment.bak.auto.1761319076"
+    ],
+    [
+      "uploads/personal/1/cases/47/alignment.json",
+      "no_parts",
+      "uploads/personal/1/cases/47/alignment.bak.auto.1761319081"
+    ],
+    [
+      "uploads/personal/1/cases/48/alignment.json",
+      "no_parts",
+      "uploads/personal/1/cases/48/alignment.bak.auto.1761319087"
+    ],
+    [
+      "uploads/personal/1/cases/49/alignment.json",
+      "no_parts",
+      "uploads/personal/1/cases/49/alignment.bak.auto.1761319092"
+    ],
+    [
+      "uploads/personal/4/cases/23/alignment.json",
+      "no_parts",
+      "uploads/personal/4/cases/23/alignment.bak.auto.1761319098"
+    ],
+    [
+      "uploads/personal/4/cases/24/alignment.json",
+      "no_parts",
+      "uploads/personal/4/cases/24/alignment.bak.auto.1761319103"
+    ],
+    [
+      "uploads/personal/4/cases/28/alignment.json",
+      "no_parts",
+      "uploads/personal/4/cases/28/alignment.bak.auto.1761319108"
+    ],
+    [
+      "uploads/personal/4/cases/29/alignment.json",
+      "no_parts",
+      "uploads/personal/4/cases/29/alignment.bak.auto.1761319108"
+    ],
+    [
+      "uploads/personal/4/cases/30/alignment.json",
+      "no_parts",
+      "uploads/personal/4/cases/30/alignment.bak.auto.1761319108"
+    ]
+  ],
+  "skipped": [
+    [
+      "uploads/personal/1/cases/19/alignment.json",
+      "no_transcript_norm"
+    ]
+  ],
+  "errors": []
+}
