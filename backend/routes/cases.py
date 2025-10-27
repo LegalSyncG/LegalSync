@@ -362,8 +362,18 @@ def _align_job(user_id: int, case_id: int, gentle_url: str) -> None:
             mapped = build_mapped_parts(original_text, words)
             result["mapped"] = mapped
             write_json(alignment_path, result)
-        except Exception:
-            pass
+        except Exception as e:
+            # If mapping fails, persist current alignment (best-effort) and mark case as failed.
+            try:
+                write_json(alignment_path, result)
+            except Exception:
+                pass
+            # Record a concise error message and stop the job to avoid marking as 'done'
+            try:
+                _write_status(case_dir, "failed", error=(str(e)[:1000]))
+            except Exception:
+                pass
+            return
         try:
             with open(transcript_json, "r", encoding="utf-8") as existing_fp:
                 existing_entries = json.load(existing_fp)
@@ -570,8 +580,12 @@ def case_alignment(case_id: int):
                 mapped_updated = build_mapped_parts(transcript_text, words or [])
                 payload["mapped"] = mapped_updated
                 write_json(alignment_path, payload)
-            except Exception:
-                pass
+            except Exception as e:
+                # Avoid leaving case stuck in 'building' — record failure so frontend won't wait forever
+                try:
+                    _write_status(case_dir, "failed", error=(str(e)[:1000]))
+                except Exception:
+                    pass
 
     return jsonify(payload)
 

@@ -1064,32 +1064,97 @@ function isSupportedTranscriptFile(file) {
     const spans = Array.from(container.querySelectorAll('.word'));
     if (!spans.length) return;
 
-    // Build sequence of letter/number tokens across all entries with ordinals
-    const wordlike = [];
-    const isAlpha = (t) => /^[\p{L}']+$/u.test(t);
-    const isNum = (t) => /^[0-9][0-9.,–—-]*$/.test(t);
+    const LETTER_REGEX = /\p{L}/u;
+    const isLetterChar = (ch) => LETTER_REGEX.test(ch);
+    const isDigitChar = (ch) => ch >= '0' && ch <= '9';
+    const normalizeTokenValue = (value) => {
+      let out = '';
+      const source = String(value || '');
+      for (let i = 0; i < source.length; i += 1) {
+        const ch = source[i];
+        if (isLetterChar(ch) || isDigitChar(ch)) {
+          out += ch.toLocaleLowerCase();
+        }
+      }
+      return out;
+    };
+
+    const spanInfos = spans
+      .map((span, index) => ({
+        span,
+        index,
+        norm: normalizeTokenValue(span.textContent),
+      }))
+      .filter(info => info.norm.length > 0);
+
+    // Clear stale mapping (in case of re-renders)
+    spans.forEach((span) => {
+      delete span.dataset.entryIndex;
+      delete span.dataset.wordIndex;
+      delete span.dataset.wordOrdinal;
+    });
+
+    const collectSpansForToken = (normToken, startIdx) => {
+      if (!normToken) return null;
+      let collected = '';
+      const assigned = [];
+      let idx = startIdx;
+      while (idx < spanInfos.length && collected.length < normToken.length) {
+        const info = spanInfos[idx];
+        const nextCollected = collected + info.norm;
+        if (!normToken.startsWith(nextCollected)) {
+          return null;
+        }
+        collected = nextCollected;
+        assigned.push(info);
+        idx += 1;
+      }
+      if (collected === normToken) {
+        return { assigned, nextIdx: idx };
+      }
+      return null;
+    };
+
+    let spanIdx = 0;
     entries.forEach((entry, entryIndex) => {
       const tokens = String(entry.text || '').split(/(\s+)/);
       let ord = -1;
-      tokens.forEach((tok, tokenIndex) => {
-        const isWordToken = tok.trim().length > 0; // matches comments.js semantics
-        if (isWordToken) {
-          ord += 1;
-          if (isAlpha(tok) || isNum(tok)) {
-            wordlike.push({ entryIndex, tokenIndex, wordOrdinal: ord, text: tok });
+      for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex += 1) {
+        const tok = tokens[tokenIndex];
+        if (!tok || tok.trim().length === 0) continue;
+        ord += 1;
+        const normToken = normalizeTokenValue(tok);
+        if (!normToken) {
+          // Punctuation-only tokens still increment ordinals but do not have word spans.
+          continue;
+        }
+
+        let match = collectSpansForToken(normToken, spanIdx);
+        if (!match) {
+          // Attempt to realign by scanning forward for the next matching span group.
+          let searchIdx = spanIdx + 1;
+          while (searchIdx < spanInfos.length && !match) {
+            match = collectSpansForToken(normToken, searchIdx);
+            if (match) {
+              spanIdx = searchIdx;
+              break;
+            }
+            searchIdx += 1;
           }
         }
-      });
-    });
+        if (!match) {
+          // No matching span group found; leave spanIdx untouched and skip mapping for this token.
+          continue;
+        }
 
-    const n = Math.min(spans.length, wordlike.length);
-    for (let i = 0; i < n; i++) {
-      const s = spans[i];
-      const t = wordlike[i];
-      s.dataset.entryIndex = String(t.entryIndex);
-      s.dataset.wordIndex = String(t.tokenIndex);
-      s.dataset.wordOrdinal = String(t.wordOrdinal);
-    }
+        match.assigned.forEach((info) => {
+          info.span.dataset.entryIndex = String(entryIndex);
+          info.span.dataset.wordIndex = String(tokenIndex);
+          info.span.dataset.wordOrdinal = String(ord);
+        });
+        spanIdx = match.nextIdx;
+      }
+    });
   }
 
   function ensureNoDuplicateFlagIcon(entryIndex, wordOrdinal) {

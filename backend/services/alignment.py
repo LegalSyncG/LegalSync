@@ -2587,6 +2587,30 @@ def align_in_chunks(
 
 
 def write_json(path: str, payload: Any) -> None:
+    # Atomic write: write to a temporary file in the same directory and replace.
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    dirn = os.path.dirname(path) or "."
+    # use a temp name that won't collide
+    tmp_path = os.path.join(dirn, f".{os.path.basename(path)}.tmp")
+    # write and fsync to ensure data hits disk before replacing
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
+        try:
+            f.flush()
+            os.fsync(f.fileno())
+        except Exception:
+            # On some platforms (or in tests) fsync may fail; ignore to keep behavior robust
+            pass
+    # atomic replace
+    try:
+        os.replace(tmp_path, path)
+    except Exception:
+        # Fallback: try an unlink of target and rename
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+            os.rename(tmp_path, path)
+        except Exception:
+            # Final fallback: attempt a plain write (best-effort)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
