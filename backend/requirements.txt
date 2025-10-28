@@ -6,3 +6,4 @@ flask-cors
 requests
 faster-whisper
 python-docx
+pdfminer.six==20231228

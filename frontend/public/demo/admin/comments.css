@@ -106,9 +106,9 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  margin: 18px 0 6px;
-  padding: 4px 12px;
-  font-size: 0.75rem;
+  margin: 12px 0 4px;
+  padding: 3px 10px;
+  font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: #4b5fb2;
@@ -117,6 +117,11 @@
   border-left: 3px solid #4b5fb2;
   max-width: 100%;
   box-sizing: border-box;
+}
+
+.page-label--inline {
+  margin: 10px 0 4px;
+  align-self: flex-start;
 }
 
     .entry-box {
@@ -486,11 +491,29 @@
     .word.search-match {
       background-color: #fff3b0; /* soft yellow */
     }
-    .word.search-current {
-      background-color: #ffe066; /* stronger yellow */
-      outline: 2px solid #ffbf00;
-      outline-offset: 0;
-    }
+.word.search-current {
+  background-color: #ffe066; /* stronger yellow */
+  outline: 2px solid #ffbf00;
+  outline-offset: 0;
+}
+
+/* Preserve original line structure inside each paragraph */
+.line-block {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.line-no {
+  flex: 0 0 auto;
+  width: 2.5em;
+  text-align: right;
+  color: #9ca3af; /* muted */
+  user-select: none;
+}
+.line-text {
+  flex: 1 1 auto;
+  white-space: normal;
+}
 
     .search-container {
       margin: 0 0 12px 0;

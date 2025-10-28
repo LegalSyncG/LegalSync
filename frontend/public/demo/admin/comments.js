@@ -125,15 +125,46 @@
     let activeComment = null;
 
     // Inline segment playback state
-    let segmentGuard = { enabled: false, end: 0 };
+    let segmentGuard = { enabled: false, start: 0, end: 0 };
     let currentlyPlayingIndex = null;
 
     // Alignment-derived helpers
     const LETTER_REGEX = /\p{L}/u;
     const NUMBER_CHARS = new Set(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '.', ',', '-', '–', '—', '·']);
-    let partsTimesGlobal = [];
-    let wordPartRangesByEntry = [];
-    let wordLocationsByEntry = [];
+let partsTimesGlobal = [];
+let wordPartRangesByEntry = [];
+let wordLocationsByEntry = [];
+
+function sanitizePartsTimes(times) {
+  if (!Array.isArray(times) || !times.length) return [];
+  const sanitized = new Array(times.length);
+  let lastTime = -Infinity;
+  for (let i = 0; i < times.length; i += 1) {
+    const record = times[i];
+    if (!record || typeof record !== 'object') {
+      sanitized[i] = null;
+      continue;
+    }
+    const out = {};
+    const rawStart = Number(record.start);
+    const rawEnd = Number(record.end);
+    if (Number.isFinite(rawStart) && rawStart + 0.2 >= lastTime) {
+      out.start = rawStart;
+      lastTime = Math.max(lastTime, rawStart);
+    }
+    if (Number.isFinite(rawEnd)) {
+      if (out.start != null && rawEnd + 0.05 >= out.start && rawEnd + 0.2 >= lastTime) {
+        out.end = rawEnd;
+        lastTime = Math.max(lastTime, rawEnd);
+      } else if (out.start == null && rawEnd + 0.2 >= lastTime) {
+        out.end = rawEnd;
+        lastTime = Math.max(lastTime, rawEnd);
+      }
+    }
+    sanitized[i] = Object.keys(out).length ? out : null;
+  }
+  return sanitized;
+}
 
     initReadyNotifications();
 
@@ -361,7 +392,7 @@
 
     function prepareAlignmentMetadata(entries, alignmentPayload, rawTranscript) {
       partsTimesGlobal = Array.isArray(alignmentPayload?.mapped?.parts_times)
-        ? alignmentPayload.mapped.parts_times
+        ? sanitizePartsTimes(alignmentPayload.mapped.parts_times)
         : [];
       wordPartRangesByEntry = [];
       wordLocationsByEntry = [];
@@ -414,8 +445,58 @@
         // Ensure length matches the number of words; otherwise fall back.
         const expectedLength = extractUiWordsWithPositions(entry?.text || '').length;
         if (sanitized.length === expectedLength) {
-          wordLocationsByEntry[entryIndex] = sanitized;
+          const fallbackEntry = Array.isArray(fallbackWordLocations[entryIndex]) ? fallbackWordLocations[entryIndex] : [];
+          const merged = sanitized.map((loc, ord) => {
+            const base = (fallbackEntry && fallbackEntry[ord]) || null;
+            const basePage = base && Number.isFinite(Number(base.page)) ? Number(base.page) : null;
+            const locPage = loc && Number.isFinite(Number(loc.page)) ? Number(loc.page) : null;
+            const page = basePage ?? locPage ?? entryPage;
+            const baseLine = base && Number.isFinite(Number(base.line)) ? Number(base.line) : null;
+            const locLine = loc && Number.isFinite(Number(loc.line)) ? Number(loc.line) : null;
+            const line = baseLine ?? locLine ?? null;
+            const baseWordInLine = base && Number.isFinite(Number(base.wordInLine)) ? Number(base.wordInLine) : null;
+            const locWordInLine = loc && Number.isFinite(Number(loc.wordInLine)) ? Number(loc.wordInLine) : null;
+            const wordInLine = locWordInLine ?? baseWordInLine ?? null;
+            if (page == null && entryPage != null) {
+              return { page: entryPage, line, wordInLine };
+            }
+            return { page, line, wordInLine };
+          });
+          wordLocationsByEntry[entryIndex] = merged;
         }
+      });
+
+      // Ensure pages are monotonic across entries and fill gaps
+      let runningPage = 1;
+      wordLocationsByEntry.forEach((locations, entryIndex) => {
+        if (!Array.isArray(locations) || locations.length === 0) {
+          if (Number.isFinite(Number(entries[entryIndex]?.page))) {
+            runningPage = Math.max(runningPage, Number(entries[entryIndex].page));
+          }
+          return;
+        }
+        let entryPage = null;
+        locations.forEach((loc) => {
+          if (!loc || typeof loc !== 'object') return;
+          const locPage = Number(loc.page);
+          if (Number.isFinite(locPage)) {
+            if (locPage < runningPage) {
+              loc.page = runningPage;
+            } else {
+              runningPage = locPage;
+              loc.page = runningPage;
+            }
+          } else {
+            loc.page = runningPage;
+          }
+          if (entryPage == null && loc.page != null) {
+            entryPage = loc.page;
+          }
+        });
+        if (entryPage == null) {
+          entryPage = runningPage;
+        }
+        entries[entryIndex].page = entryPage;
       });
     }
 
@@ -605,20 +686,40 @@
 
     function playSegment(start, end) {
       if (!paragraphAudio) return;
-      // Ensure metadata loaded before seeking (some browsers)
-      const seekAndPlay = () => {
-        try { paragraphAudio.currentTime = Math.max(0, start || 0); } catch (_) {}
-        segmentGuard.end = Math.max(0, end || 0);
-        segmentGuard.enabled = Number.isFinite(segmentGuard.end) && segmentGuard.end > (start || 0);
-        paragraphAudio.play().catch(() => {/* user gesture may be required */});
+      const safeStart = Number.isFinite(start) ? Number(start) : 0;
+      const paddedStart = Math.max(0, safeStart - 0.35);
+      const safeEnd = Number.isFinite(end) ? Number(end) : null;
+
+      const beginPlayback = () => {
+        segmentGuard.start = safeStart;
+        segmentGuard.end = safeEnd != null ? safeEnd : 0;
+        segmentGuard.enabled = safeEnd != null && safeEnd > safeStart;
+        paragraphAudio.play().catch(() => {/* gesture required */});
       };
 
-      if (paragraphAudio.readyState >= 1) {
+      const seekAndPlay = () => {
+        const handleSeeked = () => {
+          paragraphAudio.removeEventListener('seeked', handleSeeked);
+          beginPlayback();
+        };
+        paragraphAudio.pause();
+        paragraphAudio.addEventListener('seeked', handleSeeked, { once: true });
+        try {
+          paragraphAudio.currentTime = paddedStart;
+        } catch (err) {
+          paragraphAudio.removeEventListener('seeked', handleSeeked);
+          beginPlayback();
+        }
+      };
+
+      if (paragraphAudio.readyState >= 2) {
         seekAndPlay();
       } else {
-        const onMeta = () => { paragraphAudio.removeEventListener('loadedmetadata', onMeta); seekAndPlay(); };
-        paragraphAudio.addEventListener('loadedmetadata', onMeta);
-        // In case src not yet loaded
+        const onCanPlay = () => {
+          paragraphAudio.removeEventListener('canplay', onCanPlay);
+          seekAndPlay();
+        };
+        paragraphAudio.addEventListener('canplay', onCanPlay, { once: true });
         try { paragraphAudio.load(); } catch (_) {}
       }
     }
@@ -642,7 +743,9 @@
         if (paragraphAudio.currentTime < entry.start || paragraphAudio.currentTime >= entry.end) {
           playSegment(entry.start, entry.end);
         } else {
-          segmentGuard.end = entry.end; segmentGuard.enabled = true;
+          segmentGuard.start = entry.start;
+          segmentGuard.end = entry.end;
+          segmentGuard.enabled = true;
           paragraphAudio.play().catch(()=>{});
         }
       } else {
@@ -660,7 +763,11 @@
       const target = Math.min(endMargin, Math.max(entry.start, unclamped));
       try { paragraphAudio.currentTime = target; } catch (_) {}
       // Keep guard to paragraph end if playing
-      if (!paragraphAudio.paused) { segmentGuard.end = entry.end; segmentGuard.enabled = true; }
+      if (!paragraphAudio.paused) {
+        segmentGuard.start = entry.start;
+        segmentGuard.end = entry.end;
+        segmentGuard.enabled = true;
+      }
     }
 
     function updateAllPlayIcons() {
@@ -802,7 +909,15 @@
           API.getCaseTranscript(caseId).catch(() => null),
         ]);
 
-        transcriptData = JSON.parse(transcriptRes.content);
+        try {
+          transcriptData = JSON.parse(transcriptRes.content);
+          if (!Array.isArray(transcriptData)) {
+            throw new Error('Transcript JSON is not an array');
+          }
+        } catch (parseErr) {
+          console.warn('Falling back to plain-text transcript parsing:', parseErr);
+          transcriptData = buildEntriesFromPlainText(transcriptRes.content || '');
+        }
         const rawTranscriptText = typeof rawTranscriptRes?.text === 'string' ? rawTranscriptRes.text : null;
         prepareAlignmentMetadata(transcriptData, alignmentRes, rawTranscriptText);
 
@@ -823,6 +938,19 @@
         console.error('Failed to load transcript or comments:', error);
         container.textContent = 'Failed to load transcript.';
       }
+    }
+
+    function buildEntriesFromPlainText(text) {
+      if (typeof text !== 'string' || !text.trim()) return [];
+      const blocks = text.split(/\n\s*\n+/).map((block) => block.trim()).filter(Boolean);
+      return blocks.map((block, idx) => ({
+        index: idx,
+        start: null,
+        end: null,
+        text: block,
+        word_count: block.split(/\s+/).filter(Boolean).length,
+        comments: [],
+      }));
     }
 
     // Utility: normalize text for case-insensitive compare
@@ -1078,13 +1206,33 @@
     function renderComments(data) {
       container.innerHTML = '';
       let lastPage = null;
+      const fallbackLinesByPage = new Map();
+
       data.forEach((entry, entryIndex) => {
-        const page = entry && typeof entry.page === 'number' ? entry.page : null;
+        const entryPage = Number.isFinite(Number(entry?.page)) ? Number(entry.page) : null;
+        const firstMeta = getWordLocationMeta(entryIndex, 0);
+        const metaPage = firstMeta && Number.isFinite(Number(firstMeta.page)) ? Number(firstMeta.page) : null;
+        let page = metaPage ?? entryPage;
+        if (lastPage != null && page != null && page < lastPage) {
+          page = lastPage;
+        }
+        if (page == null) {
+          page = lastPage != null ? lastPage : 1;
+        }
+
+        let pageKey = page != null ? page : '__fallback';
+        if (!fallbackLinesByPage.has(pageKey)) {
+          fallbackLinesByPage.set(pageKey, 0);
+        }
+
+        let currentPageForEntry = page;
+
         if (page != null && page !== lastPage) {
           const pageLabel = document.createElement('div');
           pageLabel.className = 'page-label';
           pageLabel.textContent = `Page ${page}`;
           container.appendChild(pageLabel);
+          fallbackLinesByPage.set(page, 0);
           lastPage = page;
         }
         const entryDiv = document.createElement('div');
@@ -1094,34 +1242,143 @@
         const textEl = document.createElement('p');
         const tokens = entry.text.split(/(\s+)/);
         let wordOrdinal = -1;
+        let currentLineNumber = null;
+        let currentLineBlock = null;
+        let currentLineText = null;
+        let pendingManualBreak = false;
+
+        const startLineBlock = (lineCandidate) => {
+          let resolved;
+          if (Number.isFinite(lineCandidate)) {
+            resolved = lineCandidate;
+            fallbackLinesByPage.set(pageKey, lineCandidate);
+          } else {
+            const next = (fallbackLinesByPage.get(pageKey) || 0) + 1;
+            fallbackLinesByPage.set(pageKey, next);
+            resolved = next;
+          }
+          currentLineNumber = resolved;
+          currentLineBlock = document.createElement('div');
+          currentLineBlock.className = 'line-block';
+          const ln = document.createElement('span');
+          ln.className = 'line-no';
+          ln.textContent = resolved != null ? String(resolved) : '';
+          currentLineBlock.appendChild(ln);
+          currentLineText = document.createElement('span');
+          currentLineText.className = 'line-text';
+          currentLineBlock.appendChild(currentLineText);
+          textEl.appendChild(currentLineBlock);
+          pendingManualBreak = false;
+        };
+
+        const ensureLineBlock = (lineCandidate) => {
+          const hasCandidate = Number.isFinite(lineCandidate);
+          if (!currentLineBlock) {
+            startLineBlock(hasCandidate ? lineCandidate : null);
+            return;
+          }
+          if (hasCandidate && lineCandidate !== currentLineNumber) {
+            startLineBlock(lineCandidate);
+            return;
+          }
+          if (!hasCandidate && pendingManualBreak) {
+            startLineBlock(null);
+          }
+        };
+
+        const breakLine = () => {
+          currentLineBlock = null;
+          currentLineText = null;
+          currentLineNumber = null;
+          pendingManualBreak = true;
+        };
+
         tokens.forEach((token, tokenIndex) => {
+          const isWord = token.trim().length > 0;
+          if (!isWord) {
+            const parts = token.split(/(\n)/);
+            parts.forEach((part) => {
+              if (part === '\n') {
+                breakLine();
+                return;
+              }
+              if (!part) return;
+              const wsSpan = document.createElement('span');
+              wsSpan.textContent = part;
+              wsSpan.dataset.entryIndex = entryIndex;
+              if (currentLineText) {
+                currentLineText.appendChild(wsSpan);
+              } else {
+                textEl.appendChild(wsSpan);
+              }
+            });
+            return;
+          }
+
           const span = document.createElement('span');
           span.textContent = token;
           span.dataset.entryIndex = entryIndex;
-          const isWord = token.trim().length > 0;
-          if (isWord) {
-            wordOrdinal += 1;
-            span.classList.add('word');
-            // Preserve original semantics: data-word-index holds token index
-            span.dataset.wordIndex = String(tokenIndex);
-            span.dataset.wordOrdinal = String(wordOrdinal);
 
-            span.addEventListener('click', (e) => {
-              e.stopPropagation();
-              // Pass token index for selection to preserve saved format
-              handleWordClick(entryIndex, tokenIndex);
-            });
-
-            span.addEventListener('mouseenter', () => {
-              if (span.classList.contains('commented')) { span.style.backgroundColor = '#cce5ff'; }
-            });
-            
-            span.addEventListener('mouseleave', () => {
-              if (span.classList.contains('commented')) { span.style.backgroundColor = ''; }
-            });
+          const nextOrd = wordOrdinal + 1;
+          const meta = getWordLocationMeta(entryIndex, nextOrd);
+          const metaPage = meta && Number.isFinite(Number(meta.page)) ? Number(meta.page) : null;
+          let lineNo = meta && Number.isFinite(Number(meta.line)) ? Number(meta.line) : null;
+          const fallbackPageForWord = currentPageForEntry != null ? currentPageForEntry : page;
+          let effectivePage;
+          if (metaPage != null) {
+            if (currentPageForEntry != null && metaPage < currentPageForEntry) {
+              effectivePage = currentPageForEntry;
+            } else {
+              effectivePage = metaPage;
+            }
+          } else {
+            effectivePage = fallbackPageForWord;
+          }
+          if (effectivePage != null && effectivePage !== currentPageForEntry) {
+            currentPageForEntry = effectivePage;
+            pageKey = effectivePage != null ? effectivePage : '__fallback';
+            fallbackLinesByPage.set(pageKey, 0);
+            const inlineLabel = document.createElement('div');
+            inlineLabel.className = 'page-label page-label--inline';
+            inlineLabel.textContent = `Page ${effectivePage}`;
+            textEl.appendChild(inlineLabel);
+            breakLine();
+            lastPage = effectivePage;
+            lineNo = null; // restart numbering for new page segment
+          }
+          if (!Number.isFinite(lineNo) || lineNo <= 0) {
+            const next = (fallbackLinesByPage.get(pageKey) || 0) + 1;
+            fallbackLinesByPage.set(pageKey, next);
+            lineNo = next;
+          }
+          ensureLineBlock(lineNo);
+          if (!currentLineBlock) {
+            startLineBlock(lineNo);
           }
 
-          textEl.appendChild(span);
+          wordOrdinal = nextOrd;
+          span.classList.add('word');
+          span.dataset.wordIndex = String(tokenIndex);
+          span.dataset.wordOrdinal = String(wordOrdinal);
+
+          span.addEventListener('click', (e) => {
+            e.stopPropagation();
+            handleWordClick(entryIndex, tokenIndex);
+          });
+
+          span.addEventListener('mouseenter', () => {
+            if (span.classList.contains('commented')) { span.style.backgroundColor = '#cce5ff'; }
+          });
+
+          span.addEventListener('mouseleave', () => {
+            if (span.classList.contains('commented')) { span.style.backgroundColor = ''; }
+          });
+
+          if (currentLineText) {
+            currentLineText.appendChild(span);
+          } else {
+            textEl.appendChild(span);
+          }
         });
 
         // After building all words for this paragraph, underline each comment's exact length range
@@ -1178,7 +1435,8 @@
               }, 100);
             });
 
-            textEl.insertBefore(icon, startSpan);
+            // Insert the icon adjacent to the first word, within its line block
+            startSpan.parentNode.insertBefore(icon, startSpan);
           }
         });
 

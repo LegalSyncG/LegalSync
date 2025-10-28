@@ -26,7 +26,7 @@
       </nav>
     </aside>
 
-    <main class="content">
+    <main class="content dashboard-view">
       <div id="transcriptPreview" class="transcript-preview" style="display: none;">
         <div class="preview-header">
           <div>
@@ -103,9 +103,9 @@
           <span id="audioFileName" class="file-name">No file chosen</span>
         </div>
 
-        <label>Transcript (TXT, DOCX, or Pages) — or paste below</label>
+        <label>Transcript PDF or DOCX — or paste below</label>
         <div class="file-picker">
-          <input id="caseTranscriptFile" type="file" accept=".txt,.docx,.pages,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.apple.pages,text/plain" hidden />
+          <input id="caseTranscriptFile" type="file" accept=".txt,.docx,.pdf,.pages,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.apple.pages,text/plain" hidden />
           <button type="button" id="pickTranscript" class="view-btn light">Choose file</button>
           <span id="transcriptFileName" class="file-name">No file chosen</span>
         </div>

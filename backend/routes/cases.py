@@ -23,6 +23,7 @@ from services.alignment import (
     _tokenize_words,
 )
 from services.whisper_asr import transcribe_with_whisper
+from services.pdf_extract import extract_pdf_text_and_metadata
 from xml.etree import ElementTree
 
 
@@ -78,6 +79,49 @@ def _paragraph_has_page_break(paragraph) -> bool:
     return False
 
 
+def _extract_paragraph_text_with_breaks(paragraph) -> tuple[str, bool]:
+    """Extract paragraph text preserving manual line breaks and detect page breaks.
+
+    - Inserts "\n" for text-wrapping breaks (w:br without type or with type != 'page').
+    - Detects page breaks (w:br with type='page' or w:lastRenderedPageBreak) and returns a flag.
+    - Orders content according to underlying XML children to preserve break positions.
+    """
+    try:
+        el = paragraph._element
+    except Exception:
+        # Fallback: no structured access; return plain text
+        return (paragraph.text or ""), False
+
+    has_page_break = False
+    parts: list[str] = []
+
+    # Iterate through runs preserving order of text and breaks
+    for run in paragraph.runs:
+        run_el = run._element
+        for child in list(run_el):
+            tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            if tag == 't':
+                # Text node
+                txt = (child.text or '')
+                parts.append(txt)
+            elif tag == 'br':
+                br_type = child.get(qn('w:type'))
+                if br_type == 'page':
+                    has_page_break = True
+                else:
+                    parts.append('\n')
+            elif tag == 'lastRenderedPageBreak':
+                has_page_break = True
+        # In some documents, run.text holds text but children may not list <w:t>
+        # Ensure we didn't miss trailing plain text
+        if run.text and (not parts or not run.text.endswith(parts[-1])):
+            # Avoid duplicating if already consumed from <w:t>
+            parts.append(run.text)
+
+    text = "".join(parts).strip()
+    return text, has_page_break
+
+
 def _detect_transcript_extension(file_storage) -> str:
     filename = (file_storage.filename or "").lower()
     ext = os.path.splitext(filename)[1]
@@ -89,6 +133,10 @@ def _detect_transcript_extension(file_storage) -> str:
             return ".docx"
         if "apple.pages" in mimetype or mimetype.endswith("/pages"):
             return ".pages"
+        if mimetype == "application/pdf" or mimetype.endswith("/pdf"):
+            return ".pdf"
+    if ext.lower() == ".pdf":
+        return ".pdf"
     return ext or ".txt"
 
 
@@ -110,14 +158,31 @@ def _extract_text_from_docx(file_storage) -> Tuple[str, Dict[str, List[Dict[str,
         raise ValueError("Unable to read DOCX document") from exc
     segments: List[Dict[str, object]] = []
     current_page = 1
+    # Build a raw transcript preserving manual line breaks and page boundaries (as form feed)
+    raw_parts: List[str] = []
     for paragraph in document.paragraphs:
-        text = (paragraph.text or "").strip()
+        text, page_break = _extract_paragraph_text_with_breaks(paragraph)
+        text = text.strip()
         if text:
             segments.append({"text": text, "page": current_page})
-        if _paragraph_has_page_break(paragraph):
+            if raw_parts:
+                raw_parts.append("\n\n")  # paragraph separator
+            raw_parts.append(text)
+        if page_break or _paragraph_has_page_break(paragraph):
+            # Insert a form feed to mark page boundary for downstream line/page mapping
+            raw_parts.append("\n\f\n")
             current_page += 1
-    joined = "\n\n".join(seg["text"] for seg in segments if seg["text"]).strip()
+
+    joined = "".join(raw_parts).strip()
     return joined, {"paragraphs": segments}
+
+
+def _extract_text_from_pdf(file_storage) -> Tuple[str, Dict[str, List[Dict[str, object]]]]:
+    try:
+        raw_text, meta = extract_pdf_text_and_metadata(file_storage)
+    except Exception as exc:
+        raise ValueError("Unable to read PDF document") from exc
+    return raw_text, meta
 
 
 def _extract_text_from_pages(file_storage) -> str:
@@ -172,6 +237,8 @@ def _load_transcript_text(transcript_file, transcript_text: Optional[str]) -> Tu
         ext = _detect_transcript_extension(transcript_file)
         if ext == ".docx":
             return _extract_text_from_docx(transcript_file)
+        if ext == ".pdf":
+            return _extract_text_from_pdf(transcript_file)
         if ext == ".pages":
             text = _extract_text_from_pages(transcript_file)
             return text, {}
@@ -188,7 +255,126 @@ def _load_transcript_text(transcript_file, transcript_text: Optional[str]) -> Tu
     return "", {}
 
 
-def _collect_external_comments(entries):
+def _normalize_location(raw_loc, entry_page):
+    page = None
+    line = None
+    word_in_line = None
+    if raw_loc and isinstance(raw_loc, dict):
+        try:
+            page = int(raw_loc.get("page")) if raw_loc.get("page") is not None else None
+        except (TypeError, ValueError):
+            page = None
+        try:
+            line = int(raw_loc.get("line_on_page")) if raw_loc.get("line_on_page") is not None else int(raw_loc.get("line")) if raw_loc.get("line") is not None else None
+        except (TypeError, ValueError):
+            line = None
+        try:
+            word_in_line = int(raw_loc.get("word_in_line")) if raw_loc.get("word_in_line") is not None else None
+        except (TypeError, ValueError):
+            word_in_line = None
+
+    if page is None:
+        page = entry_page if entry_page is not None else 1
+
+    if line is None:
+        line = None
+
+    return {
+        "page": page,
+        "line": line,
+        "word_in_line": word_in_line,
+    }
+
+
+def _parse_raw_tokens(raw_text: str):
+    tokens = []
+    page = 1
+    line = 0
+    word_in_line = 0
+    line_pending = True
+    idx = 0
+    length = len(raw_text)
+
+    def normalize(token):
+        return ''.join(ch.lower() for ch in token if ch.isalpha() or ch.isdigit())
+
+    while idx < length:
+        ch = raw_text[idx]
+        if ch == '\f':
+            line_pending = True
+            word_in_line = 0
+            page += 1
+            line = 0
+            idx += 1
+            continue
+        if ch == '\n':
+            line_pending = True
+            word_in_line = 0
+            idx += 1
+            continue
+        if ch.isspace():
+            idx += 1
+            continue
+
+        start = idx
+        while idx < length:
+            ch2 = raw_text[idx]
+            if ch2 in {'\f', '\n'} or ch2.isspace():
+                break
+            idx += 1
+        token = raw_text[start:idx]
+        if not token:
+            continue
+        if line_pending:
+            line += 1
+            line_pending = False
+        normalized = normalize(token)
+        if normalized:
+            word_in_line += 1
+        tokens.append({
+            "value": token,
+            "normalized": normalized,
+            "page": page,
+            "line": line if normalized else None,
+            "word_in_line": word_in_line if normalized else None,
+        })
+    return tokens
+
+
+def _build_locations_from_raw(entries, raw_text: str):
+    if not raw_text:
+        return None
+    raw_tokens = _parse_raw_tokens(raw_text)
+    raw_idx = 0
+    locations_per_entry = []
+
+    for entry in entries:
+        entry_locations = []
+        count = entry.get("word_count")
+        if not isinstance(count, int) or count < 0:
+            count = len(_tokenize_words(entry.get("text") or ""))
+        for _ in range(count):
+            matched = None
+            while raw_idx < len(raw_tokens):
+                candidate = raw_tokens[raw_idx]
+                raw_idx += 1
+                if candidate.get("normalized"):
+                    matched = candidate
+                    break
+            if matched:
+                entry_locations.append({
+                    "page": matched.get("page"),
+                    "line": matched.get("line"),
+                    "word_in_line": matched.get("word_in_line"),
+                })
+            else:
+                entry_locations.append({"page": entry.get("page"), "line": None, "word_in_line": None})
+        locations_per_entry.append(entry_locations)
+
+    return locations_per_entry
+
+
+def _collect_external_comments(entries, word_times_by_entry=None, computed_locations=None):
     results = []
     if not isinstance(entries, list):
         return results
@@ -196,6 +382,13 @@ def _collect_external_comments(entries):
         entry_text = str(entry.get("text") or "")
         words = entry_text.split()
         comments = entry.get("comments") or []
+        if computed_locations and idx < len(computed_locations):
+            locations = computed_locations[idx] or []
+        else:
+            locations = entry.get("word_locations") or []
+        times_for_entry = None
+        if word_times_by_entry and idx < len(word_times_by_entry):
+            times_for_entry = word_times_by_entry[idx]
         for comment in comments:
             ext_comment = (comment.get("external_comment") or "").strip()
             if not ext_comment:
@@ -220,6 +413,25 @@ def _collect_external_comments(entries):
                 bounded_end = 0
                 selection = []
             length = len(selection)
+
+            def _fetch_location(word_index):
+                loc = locations[word_index] if 0 <= word_index < len(locations) else None
+                entry_page = entry.get("page")
+                return _normalize_location(loc if isinstance(loc, dict) else None, entry_page)
+
+            start_loc = _fetch_location(start)
+            end_loc = _fetch_location(bounded_end)
+
+            def _fetch_times(word_index):
+                if not times_for_entry:
+                    return {"start": None, "end": None}
+                if 0 <= word_index < len(times_for_entry):
+                    return times_for_entry[word_index]
+                return {"start": None, "end": None}
+
+            start_time = _fetch_times(start).get("start")
+            end_time = _fetch_times(bounded_end).get("end")
+
             results.append(
                 {
                     "paragraph_index": idx,
@@ -228,9 +440,86 @@ def _collect_external_comments(entries):
                     "length": length,
                     "selected_text": " ".join(selection).strip(),
                     "external_comment": ext_comment,
+                    "page_start": start_loc.get("page"),
+                    "page_end": end_loc.get("page"),
+                    "line_start": start_loc.get("line"),
+                    "line_end": end_loc.get("line"),
+                    "start_time": start_time,
+                    "end_time": end_time,
                 }
             )
     return results
+
+
+def _load_alignment_word_times(entries, case_dir):
+    alignment_path = os.path.join(case_dir, "alignment.json")
+    if not os.path.isfile(alignment_path):
+        return None
+    try:
+        with open(alignment_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return None
+    words = payload.get("words") if isinstance(payload, dict) else None
+    if not isinstance(words, list):
+        return None
+    word_index = 0
+    word_times = []
+    for entry in entries:
+        count = entry.get("word_count")
+        if not isinstance(count, int) or count < 0:
+            count = len(_tokenize_words(entry.get("text") or ""))
+        entry_times = []
+        for _ in range(count):
+            if word_index < len(words):
+                w = words[word_index] or {}
+                entry_times.append({
+                    "start": w.get("start"),
+                    "end": w.get("end"),
+                })
+            else:
+                entry_times.append({"start": None, "end": None})
+            word_index += 1
+        word_times.append(entry_times)
+    return word_times
+
+
+def _format_timestamp_range(start, end):
+    def fmt(val):
+        if val is None:
+            return None
+        try:
+            seconds = float(val)
+        except (TypeError, ValueError):
+            return None
+        if seconds < 0:
+            seconds = 0
+        total_minutes = int(seconds // 60)
+        hours = total_minutes // 60
+        minutes = total_minutes % 60
+        return f"{hours:02d}:{minutes:02d}"
+
+    start_str = fmt(start)
+    end_str = fmt(end)
+    if start_str and end_str and start_str != end_str:
+        return f"{start_str} – {end_str}"
+    return start_str or end_str or None
+
+
+def _format_page_label(page_start, page_end):
+    if page_start is None and page_end is None:
+        return None
+    if page_end is None or page_start == page_end:
+        return f"Page {page_start or page_end}"
+    return f"Pages {page_start}–{page_end}"
+
+
+def _format_line_label(line_start, line_end):
+    if line_start is None and line_end is None:
+        return None
+    if line_end is None or line_start == line_end:
+        return f"Line {line_start or line_end}"
+    return f"Lines {line_start}–{line_end}"
 
 
 def _build_external_comments_text(case_label: str, comments, generated_iso: str) -> str:
@@ -246,9 +535,23 @@ def _build_external_comments_text(case_label: str, comments, generated_iso: str)
         length = comment["length"]
         selected = comment["selected_text"].replace('"', "'")
         external_note = comment["external_comment"].replace('"', "'")
-        lines.append(f"[{idx}] Paragraph {comment['paragraph_index'] + 1}, words {start_word}-{end_word} (length: {length})")
+        location_bits = []
+        page_label = _format_page_label(comment.get("page_start"), comment.get("page_end"))
+        if page_label:
+            location_bits.append(page_label)
+        line_label = _format_line_label(comment.get("line_start"), comment.get("line_end"))
+        if line_label:
+            location_bits.append(line_label)
+        location_str = ", ".join(location_bits) if location_bits else "Location unknown"
+        words_span = f"words {start_word}-{end_word} (length: {length})"
+        lines.append(f"{idx}) {location_str}, {words_span}")
+        ts = _format_timestamp_range(comment.get("start_time"), comment.get("end_time"))
+        if ts:
+            lines.append(f"Timestamp: {ts}")
+        else:
+            lines.append("Timestamp: unavailable")
         lines.append(f"Text: '{selected}'")
-        lines.append(f"External comment: '{external_note}'")
+        lines.append(f"Comment: '{external_note}'")
         lines.append("")
     return "\n".join(lines).strip() + "\n"
 
@@ -265,9 +568,23 @@ def _build_external_comments_docx(case_label: str, comments, generated_iso: str)
         length = comment["length"]
         selected = comment["selected_text"].replace('"', "'")
         external_note = comment["external_comment"].replace('"', "'")
-        document.add_paragraph(f"[{idx}] Paragraph {comment['paragraph_index'] + 1}, words {start_word}-{end_word} (length: {length})")
+        location_bits = []
+        page_label = _format_page_label(comment.get("page_start"), comment.get("page_end"))
+        if page_label:
+            location_bits.append(page_label)
+        line_label = _format_line_label(comment.get("line_start"), comment.get("line_end"))
+        if line_label:
+            location_bits.append(line_label)
+        location_str = ", ".join(location_bits) if location_bits else "Location unknown"
+        words_span = f"words {start_word}-{end_word} (length: {length})"
+        document.add_paragraph(f"{idx}) {location_str}, {words_span}")
+        ts = _format_timestamp_range(comment.get("start_time"), comment.get("end_time"))
+        if ts:
+            document.add_paragraph(f"Timestamp: {ts}")
+        else:
+            document.add_paragraph("Timestamp: unavailable")
         document.add_paragraph(f"Text: '{selected}'")
-        document.add_paragraph(f"External comment: '{external_note}'")
+        document.add_paragraph(f"Comment: '{external_note}'")
         document.add_paragraph("")
     buffer = BytesIO()
     document.save(buffer)
@@ -619,12 +936,19 @@ def export_external_comments(case_id: int):
     with open(transcript_json_path, "r", encoding="utf-8") as f:
         entries = json.load(f)
 
-    comments = _collect_external_comments(entries)
+    word_times = _load_alignment_word_times(entries, case_dir)
+    raw_transcript_path = os.path.join(case_dir, "transcript.txt")
+    raw_text = ""
+    if os.path.isfile(raw_transcript_path):
+        with open(raw_transcript_path, "r", encoding="utf-8", errors="ignore") as rt:
+            raw_text = rt.read()
+    computed_locations = _build_locations_from_raw(entries, raw_text)
+    comments = _collect_external_comments(entries, word_times, computed_locations)
     if not comments:
         return jsonify({"error": "No external comments available"}), 400
 
     now = datetime.utcnow()
-    generated = now.isoformat() + "Z"
+    generated = now.strftime("%Y-%m-%d %H:%M")
     case_label = case.name or f"Case {case_id}"
     timestamp = now.strftime("%Y%m%d-%H%M%S")
     base_name = f"case-{case_id}-external-comments-{timestamp}"
@@ -633,15 +957,20 @@ def export_external_comments(case_id: int):
         payload = _build_external_comments_text(case_label, comments, generated)
         response = Response(payload, mimetype="text/plain; charset=utf-8")
         response.headers["Content-Disposition"] = f'attachment; filename={base_name}.txt'
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
         return response
     if fmt in {"docx", "doc"}:
         buffer = _build_external_comments_docx(case_label, comments, generated)
-        return send_file(
+        resp = send_file(
             buffer,
             mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             as_attachment=True,
             download_name=f"{base_name}.docx",
         )
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
     return jsonify({"error": "Unsupported format"}), 400
 
 

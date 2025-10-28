@@ -2330,6 +2330,14 @@ def build_paragraph_entries_from_alignment(
         block_locations.clear()
 
     for raw_line in transcript_text.splitlines():
+        # Handle explicit form-feed page breaks preserved from import
+        if raw_line.strip() == "\f":
+            # Close current paragraph block before page turn
+            finalize_block()
+            current_page += 1
+            line_on_page = 0
+            continue
+
         line = raw_line.replace("\r", "").strip()
         if not line:
             finalize_block()

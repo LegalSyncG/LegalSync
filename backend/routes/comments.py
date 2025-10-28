@@ -21,8 +21,14 @@ def load_transcript_json(user_id, case_id):
         return json.load(f), file_path
 
 def save_transcript_json(data, file_path):
-    with open(file_path, 'w') as f:
-        json.dump(data, f, indent=2)
+    with open(file_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.flush()
+        try:
+            import os
+            os.fsync(f.fileno())
+        except OSError:
+            pass
 
 @comments_bp.route('/text/<int:case_id>/entry/<int:index>', methods=['PATCH'])
 @jwt_required()

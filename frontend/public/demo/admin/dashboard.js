@@ -66,6 +66,34 @@
       } catch (_) {}
     }
 
+    const LETTER_REGEX = /\p{L}/u;
+    const DIGIT_REGEX = /[0-9]/;
+
+    function isLetterChar(ch) {
+      return LETTER_REGEX.test(ch);
+    }
+
+    function isDigitChar(ch) {
+      return DIGIT_REGEX.test(ch);
+    }
+
+    function normalizeTokenForMapping(token) {
+      if (!token) return '';
+      let out = '';
+      const source = String(token).normalize('NFKD');
+      for (const ch of source) {
+        if (isLetterChar(ch) || isDigitChar(ch) || ch === '\'') {
+          out += ch.toLocaleLowerCase();
+        }
+      }
+      return out;
+    }
+
+    function resolveNumber(value) {
+      const num = Number(value);
+      return Number.isFinite(num) ? num : null;
+    }
+
     let progressCache = readJSON(PROGRESS_STORAGE_KEY, {});
     let readySeen = readSessionJSON(READY_SEEN_SESSION_KEY, {});
     let activeAudioNode = null;
@@ -414,7 +442,7 @@
       caseTranscriptFileEl.addEventListener('change', () => {
         const file = caseTranscriptFileEl.files && caseTranscriptFileEl.files[0];
         if (file && !isSupportedTranscriptFile(file)) {
-          showNotification('Unsupported transcript file. Please choose a TXT, DOCX, or Pages document.', 'error');
+          showNotification('Unsupported transcript file. Please choose a TXT, DOCX, PDF, or Pages document.', 'error');
           caseTranscriptFileEl.value = '';
           if (transcriptFileName) transcriptFileName.textContent = 'No file chosen';
           return;
@@ -559,10 +587,11 @@ function initReadyNotifications() {
   });
 }
 
-const SUPPORTED_TRANSCRIPT_EXTENSIONS = ['.txt', '.docx', '.pages'];
+const SUPPORTED_TRANSCRIPT_EXTENSIONS = ['.txt', '.docx', '.pdf', '.pages'];
 const SUPPORTED_TRANSCRIPT_MIME = [
   'text/plain',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/pdf',
   'application/vnd.apple.pages'
 ];
 
@@ -616,7 +645,7 @@ function isSupportedTranscriptFile(file) {
 
       if (!audioFile) { showNotification('Please select an MP3 audio file.', 'error'); return; }
       if (transcriptFile && !isSupportedTranscriptFile(transcriptFile)) {
-        showNotification('Transcript must be provided as TXT, DOCX, or Pages file.', 'error');
+        showNotification('Transcript must be provided as TXT, DOCX, PDF, or Pages file.', 'error');
         return;
       }
       if (!transcriptFile && !transcriptText) { showNotification('Please provide a transcript (file or pasted text).', 'error'); return; }
@@ -655,31 +684,121 @@ function isSupportedTranscriptFile(file) {
       if (!container) return;
       container.innerHTML = '';
       let lastPage = null;
+      let runningPage = 1;
+
       entries.forEach((entry, index) => {
-        const page = entry && typeof entry.page === 'number' ? entry.page : null;
-        if (page != null && page !== lastPage) {
-          const marker = document.createElement('div');
-          marker.className = 'page-marker';
-          marker.textContent = `Page ${page}`;
-          container.appendChild(marker);
-          lastPage = page;
+        const rawText = String(entry?.text ?? '');
+        const { segments, lastPage: updatedPage } = buildDashboardSegments(entry, rawText, runningPage);
+        runningPage = updatedPage;
+        if (!segments.length) {
+          const para = document.createElement('div');
+          para.className = 'transcript-paragraph';
+          rawText.split(/\n{2,}/).forEach(block => {
+            const trimmed = block.trim();
+            if (!trimmed) return;
+            const p = document.createElement('p');
+            p.textContent = trimmed.replace(/\n+/g, ' ');
+            para.appendChild(p);
+          });
+          para.dataset.start = entry.start;
+          para.dataset.end = entry.end;
+          para.dataset.index = index;
+          para.addEventListener('click', () => {
+            setAudioCurrentTime(entries[index].start);
+            highlightedParagraphIndex = index;
+          });
+          container.appendChild(para);
+          return;
         }
-        const p = document.createElement('p');
-        p.textContent = entry.text;
-        p.className = 'transcript-paragraph';
-        p.dataset.start = entry.start;
-        p.dataset.end = entry.end;
-        p.dataset.index = index;
-        if (page != null) p.dataset.page = page;
 
-        p.addEventListener('click', () => {
-          setAudioCurrentTime(entries[index].start);
-          highlightedParagraphIndex = index; // Track highlighted paragraph
-          //audio.play(); 
+        segments.forEach(({ page, text }, segIdx) => {
+          if (page != null && (lastPage == null || page > lastPage)) {
+            const marker = document.createElement('div');
+            marker.className = 'page-marker';
+            marker.textContent = `Page ${page}`;
+            container.appendChild(marker);
+            lastPage = page;
+          }
+          const para = document.createElement('div');
+          para.className = 'transcript-paragraph';
+          const p = document.createElement('p');
+          p.textContent = text;
+          para.appendChild(p);
+          if (segIdx === 0 && page != null) {
+            para.dataset.page = page;
+          }
+          para.dataset.start = entry.start;
+          para.dataset.end = entry.end;
+          para.dataset.index = index;
+          para.addEventListener('click', () => {
+            setAudioCurrentTime(entries[index].start);
+            highlightedParagraphIndex = index;
+          });
+          container.appendChild(para);
         });
-
-        container.appendChild(p);
       });
+    }
+
+    function buildDashboardSegments(entry, rawText, startingPage = 1) {
+      const locations = Array.isArray(entry?.word_locations) ? entry.word_locations : [];
+      if (!locations.length) {
+        return { segments: [], lastPage: startingPage };
+      }
+
+      const segments = [];
+      const tokens = rawText.split(/(\s+)/);
+      let wordOrd = -1;
+      let runningPage = Number.isFinite(Number(startingPage)) ? Number(startingPage) : 1;
+      let currentPage = Number.isFinite(Number(entry?.page)) ? Number(entry.page) : runningPage;
+      if (currentPage < runningPage) currentPage = runningPage;
+
+      let segment = null;
+      let chunkBuffer = [];
+
+      const flushSegment = () => {
+        if (!segment) return;
+        const text = chunkBuffer.join('').replace(/\s+/g, ' ').trim();
+        if (text) {
+          segments.push({ page: segment.page, text });
+        }
+        segment = null;
+        chunkBuffer = [];
+      };
+
+      tokens.forEach((token) => {
+        if (token === '') return;
+        const isWord = token.trim().length > 0;
+        if (!isWord) {
+          if (/\n{2,}/.test(token)) {
+            flushSegment();
+          } else if (/\n/.test(token)) {
+            chunkBuffer.push(' ');
+          } else {
+            chunkBuffer.push(token);
+          }
+          return;
+        }
+
+        wordOrd += 1;
+        const loc = locations[wordOrd] || {};
+        let locPage = Number.isFinite(Number(loc.page)) ? Number(loc.page) : null;
+        if (locPage != null && locPage < runningPage) {
+          locPage = runningPage;
+        }
+        if (locPage != null && locPage > runningPage) {
+          runningPage = locPage;
+        }
+        const effectivePage = locPage ?? currentPage ?? runningPage;
+        if (!segment || effectivePage > segment.page) {
+          flushSegment();
+          segment = { page: effectivePage, lines: [] };
+          currentPage = effectivePage;
+        }
+        chunkBuffer.push(token);
+      });
+
+      flushSegment();
+      return { segments, lastPage: runningPage };
     }
 
   
@@ -693,6 +812,178 @@ function isSupportedTranscriptFile(file) {
       syncHighlight(audio, parsed);
     }
 
+    const __karaokeState = new WeakMap();
+
+    function attachKaraokeHighlighter(container, audio, words) {
+      if (!container || !audio) return;
+
+      const prev = __karaokeState.get(audio);
+      if (prev && prev.listener) {
+        try { audio.removeEventListener('timeupdate', prev.listener); } catch (_) {}
+      }
+
+      const state = { prevTime: -Infinity, lastIndex: -1, lastScrolled: -1, listener: null };
+      __karaokeState.set(audio, state);
+
+      const EPS = 1e-3;
+      const SEEK_TOL = 0.25; // seconds
+      const MIN_GAP = 1e-3;
+
+      const spans = Array.from(container.querySelectorAll('.word'));
+      if (!spans.length) return;
+
+      const mediaDuration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : null;
+      const hasDuration = mediaDuration != null;
+      const parseTime = (value) => {
+        if (value == null || value === '') return null;
+        const num = Number.parseFloat(value);
+        return Number.isFinite(num) ? num : null;
+      };
+      const timingList = Array.isArray(words) ? words : null;
+
+      const computeTimings = () => {
+        const count = spans.length;
+        const starts = new Array(count);
+        const ends = new Array(count);
+        const baseStarts = new Array(count);
+        const baseEnds = new Array(count);
+
+        for (let i = 0; i < count; i += 1) {
+          const spanStart = parseTime(spans[i].dataset.start);
+          const spanEnd = parseTime(spans[i].dataset.end);
+          const word = timingList && timingList[i] ? timingList[i] : null;
+          const wordStart = word ? resolveNumber(word.start) : null;
+          const wordEnd = word ? resolveNumber(word.end) : null;
+          baseStarts[i] = Number.isFinite(spanStart) ? spanStart : (Number.isFinite(wordStart) ? wordStart : null);
+          baseEnds[i] = Number.isFinite(spanEnd) ? spanEnd : (Number.isFinite(wordEnd) ? wordEnd : null);
+        }
+
+        const nextKnownStart = new Array(count);
+        let upcoming = hasDuration ? mediaDuration : null;
+        for (let i = count - 1; i >= 0; i -= 1) {
+          if (Number.isFinite(baseStarts[i])) {
+            upcoming = baseStarts[i];
+          }
+          nextKnownStart[i] = Number.isFinite(upcoming) ? upcoming : null;
+        }
+
+        let prevEnd = 0;
+
+        for (let i = 0; i < count; i += 1) {
+          let st = baseStarts[i];
+          if (!Number.isFinite(st)) {
+            st = Number.isFinite(prevEnd) ? prevEnd : 0;
+          }
+          if (st < prevEnd) {
+            st = prevEnd;
+          }
+
+          let en = baseEnds[i];
+          if (!Number.isFinite(en) || en <= st) {
+            const boundary = nextKnownStart[i];
+            if (Number.isFinite(boundary) && boundary > st) {
+              en = boundary;
+            } else {
+              en = st;
+            }
+          }
+
+          if (hasDuration) {
+            if (st > mediaDuration) st = mediaDuration;
+            if (en > mediaDuration) en = mediaDuration;
+          }
+
+          if (en <= st) {
+            en = st + MIN_GAP;
+            if (hasDuration && en > mediaDuration) {
+              en = mediaDuration;
+            }
+          }
+
+          const gap = Math.max(en - st, MIN_GAP);
+          starts[i] = st;
+          ends[i] = st + gap;
+          prevEnd = ends[i];
+        }
+
+        return { starts, ends };
+      };
+
+      const { starts, ends } = computeTimings();
+
+      const findForward = (from, current) => {
+        let idx = Math.max(0, from);
+        const n = spans.length;
+        while (idx + 1 < n && current >= starts[idx + 1] - EPS) {
+          idx += 1;
+        }
+        while (idx < n && current >= ends[idx] - EPS) {
+          idx += 1;
+        }
+        if (idx >= n) idx = n - 1;
+        return idx;
+      };
+
+      const findBySearch = (current) => {
+        let lo = 0, hi = starts.length - 1, best = 0;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (current < starts[mid]) {
+            hi = mid - 1;
+          } else {
+            best = mid;
+            lo = mid + 1;
+          }
+        }
+        if (current > ends[best] + EPS && best + 1 < starts.length) {
+          best += 1;
+        }
+        if (best < 0) best = 0;
+        if (best >= starts.length) best = starts.length - 1;
+        return best;
+      };
+
+      const onTime = () => {
+        const current = getAudioCurrentTime(audio);
+        if (!Number.isFinite(current)) return;
+
+        const seekingBack = current < state.prevTime - SEEK_TOL;
+        const seekingFwd = current > state.prevTime + SEEK_TOL;
+
+        let nextIndex;
+        if (state.lastIndex < 0 || seekingBack) {
+          nextIndex = findBySearch(current);
+        } else if (seekingFwd) {
+          nextIndex = findBySearch(current);
+        } else {
+          nextIndex = findForward(state.lastIndex, current);
+        }
+
+        if (nextIndex < 0) nextIndex = 0;
+        if (nextIndex >= spans.length) nextIndex = spans.length - 1;
+
+        spans.forEach((el, idx) => {
+          if (idx === nextIndex) el.classList.add('highlighted');
+          else el.classList.remove('highlighted');
+        });
+
+        if (seekingBack) {
+          state.lastScrolled = nextIndex;
+        } else if (nextIndex > state.lastScrolled) {
+          const active = spans[nextIndex];
+          try { active.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (_) {}
+          state.lastScrolled = nextIndex;
+        }
+
+        state.lastIndex = nextIndex;
+        state.prevTime = current;
+      };
+
+      state.listener = onTime;
+      audio.addEventListener('timeupdate', onTime);
+      onTime();
+    }
+
     function renderKaraoke(audio, words) {
       const container = getTranscriptContainer();
       if (!container) return;
@@ -701,72 +992,435 @@ function isSupportedTranscriptFile(file) {
         const span = document.createElement('span');
         span.textContent = (w.word || '') + ' ';
         span.className = 'word';
-        if (w.start != null) span.dataset.start = w.start;
-        if (w.end != null) span.dataset.end = w.end;
+        if (w.start != null) span.dataset.start = `${w.start}`;
+        if (w.end != null) span.dataset.end = `${w.end}`;
         span.addEventListener('click', () => {
           if (w.start != null) setAudioCurrentTime(w.start);
         });
         container.appendChild(span);
       });
-      audio.addEventListener('timeupdate', () => {
-        const current = getAudioCurrentTime(audio);
-        const spans = container.querySelectorAll('.word');
-        const EPS = 1e-3;
-        let activeIndex = -1;
-        for (let i = 0; i < spans.length; i++) {
-          const el = spans[i];
-          const s = parseFloat(el.dataset.start);
-          const e = parseFloat(el.dataset.end);
-          if (Number.isNaN(s) || Number.isNaN(e)) continue;
-          const isLast = i === spans.length - 1;
-          const inRange = current >= s && (isLast ? current <= e + EPS : current < e - EPS);
-          if (inRange) {
-            activeIndex = i;
-            break;
-          }
-        }
-        spans.forEach((el, idx) => {
-          if (idx === activeIndex) {
-            el.classList.add('highlighted');
-          } else {
-            el.classList.remove('highlighted');
-          }
-        });
-        if (activeIndex >= 0) {
-          const active = spans[activeIndex];
-          try { active.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (_) {}
-        }
-      });
+      assignSequentialTimings(container, words);
+      attachKaraokeHighlighter(container, audio, words);
       setupAudioControls(audio);
     }
 
-    function renderKaraokeOriginal(audio, words, transcriptTextRaw, mapped) {
+    function regroupNodesByEntries(containerEl, entries) {
+      if (!containerEl || !Array.isArray(entries) || !entries.length) return;
+      const spans = Array.from(containerEl.querySelectorAll('.word'));
+      if (!spans.length) return;
+
+      containerEl.innerHTML = '';
+      let spanPtr = 0;
+      let lastPage = null;
+      const fallbackLinesByPage = new Map();
+
+      const ensureCounter = (key) => {
+        if (!fallbackLinesByPage.has(key)) fallbackLinesByPage.set(key, 0);
+      };
+
+      entries.forEach((entry) => {
+        const paragraph = document.createElement('div');
+        paragraph.className = 'transcript-paragraph';
+        const locations = Array.isArray(entry?.word_locations) ? entry.word_locations : [];
+
+        const entryPage = Number.isFinite(Number(entry?.page)) ? Number(entry.page) : null;
+        const firstLoc = locations.length ? locations[0] : null;
+        const locPage = firstLoc && Number.isFinite(Number(firstLoc.page)) ? Number(firstLoc.page) : null;
+        let page = locPage ?? entryPage;
+        if (lastPage != null && page != null && page < lastPage) {
+          page = lastPage;
+        }
+        if (page == null) {
+          page = lastPage != null ? lastPage : 1;
+        }
+
+        let pageKey = page != null ? page : '__fallback';
+        ensureCounter(pageKey);
+
+        let currentPageForEntry = page;
+        let currentLineNumber = null;
+        let currentLineBlock = null;
+        let currentLineText = null;
+        let pendingManualBreak = false;
+        let wordOrdinal = -1;
+        let awaitingPageFirstLine = false;
+
+        if (page != null && page !== lastPage) {
+          const marker = document.createElement('div');
+          marker.className = 'page-marker';
+          marker.textContent = `Page ${page}`;
+          containerEl.appendChild(marker);
+          fallbackLinesByPage.set(page, 0);
+          awaitingPageFirstLine = true;
+          pageKey = page;
+          lastPage = page;
+        }
+
+        const startLineBlock = (lineCandidate) => {
+          let resolved;
+          if (Number.isFinite(lineCandidate)) {
+            resolved = lineCandidate;
+            fallbackLinesByPage.set(pageKey, lineCandidate);
+          } else {
+            const next = (fallbackLinesByPage.get(pageKey) || 0) + 1;
+            fallbackLinesByPage.set(pageKey, next);
+            resolved = next;
+          }
+          currentLineNumber = resolved;
+          currentLineBlock = document.createElement('div');
+          currentLineBlock.className = 'line-block';
+          const ln = document.createElement('span');
+          ln.className = 'line-no';
+          ln.textContent = resolved != null ? String(resolved) : '';
+          currentLineBlock.appendChild(ln);
+          currentLineText = document.createElement('span');
+          currentLineText.className = 'line-text';
+          currentLineBlock.appendChild(currentLineText);
+          paragraph.appendChild(currentLineBlock);
+          pendingManualBreak = false;
+        };
+
+        const ensureLineBlock = (lineCandidate) => {
+          const hasCandidate = Number.isFinite(lineCandidate);
+          if (!currentLineBlock) {
+            startLineBlock(hasCandidate ? lineCandidate : null);
+            return;
+          }
+          if (hasCandidate && lineCandidate !== currentLineNumber) {
+            startLineBlock(lineCandidate);
+            return;
+          }
+          if (!hasCandidate && pendingManualBreak) {
+            startLineBlock(null);
+          }
+        };
+
+        const breakLine = () => {
+          currentLineBlock = null;
+          currentLineText = null;
+          currentLineNumber = null;
+          pendingManualBreak = true;
+        };
+
+        const tokens = String(entry?.text || '').split(/(\s+)/);
+        tokens.forEach((token) => {
+          if (!token) return;
+          if (!token.trim()) {
+            const parts = token.split(/(\n)/);
+            parts.forEach((part) => {
+              if (part === '\n') {
+                breakLine();
+                return;
+              }
+              if (!part) return;
+              const target = currentLineText || paragraph;
+              target.appendChild(document.createTextNode(part));
+            });
+            return;
+          }
+
+          const normalized = normalizeTokenForMapping(token);
+          if (!normalized) {
+            const target = currentLineText || paragraph;
+            target.appendChild(document.createTextNode(token));
+            return;
+          }
+
+          const span = spans[spanPtr++];
+          if (!span) return;
+
+          const nextOrd = wordOrdinal + 1;
+          const loc = (nextOrd < locations.length ? locations[nextOrd] : null) || {};
+          const metaPage = loc && Number.isFinite(Number(loc.page)) ? Number(loc.page) : null;
+          let lineNo = loc && Number.isFinite(Number(loc.line_on_page ?? loc.line)) ? Number(loc.line_on_page ?? loc.line) : null;
+
+          const fallbackPageForWord = currentPageForEntry != null ? currentPageForEntry : page;
+          let effectivePage;
+          if (metaPage != null) {
+            if (currentPageForEntry != null && metaPage < currentPageForEntry) {
+              effectivePage = currentPageForEntry;
+            } else {
+              effectivePage = metaPage;
+            }
+          } else {
+            effectivePage = fallbackPageForWord;
+          }
+
+          if (effectivePage != null && effectivePage !== currentPageForEntry) {
+            currentPageForEntry = effectivePage;
+            pageKey = effectivePage != null ? effectivePage : '__fallback';
+            ensureCounter(pageKey);
+            fallbackLinesByPage.set(pageKey, 0);
+            const inlineMarker = document.createElement('div');
+            inlineMarker.className = 'page-marker-inline';
+            inlineMarker.textContent = `Page ${effectivePage}`;
+            paragraph.appendChild(inlineMarker);
+            breakLine();
+            lastPage = effectivePage;
+            lineNo = null;
+            awaitingPageFirstLine = true;
+          }
+
+          if (!Number.isFinite(lineNo) || lineNo <= 0) {
+            const next = (fallbackLinesByPage.get(pageKey) || 0) + 1;
+            fallbackLinesByPage.set(pageKey, next);
+            lineNo = next;
+          }
+
+          if (awaitingPageFirstLine) {
+            lineNo = 1;
+            fallbackLinesByPage.set(pageKey, 1);
+            awaitingPageFirstLine = false;
+          }
+
+          ensureLineBlock(lineNo);
+          if (!currentLineBlock) {
+            startLineBlock(lineNo);
+          }
+
+          wordOrdinal = nextOrd;
+          span.textContent = token;
+          currentLineText.appendChild(span);
+        });
+
+        if (paragraph.childNodes.length) {
+          containerEl.appendChild(paragraph);
+        }
+      });
+    }
+
+    function assignSequentialTimings(containerEl, words) {
+      if (!containerEl || !Array.isArray(words) || !words.length) return;
+      const spans = Array.from(containerEl.querySelectorAll('.word'));
+      if (!spans.length) return;
+      const limit = Math.min(spans.length, words.length);
+      for (let i = 0; i < limit; i += 1) {
+        const span = spans[i];
+        const word = words[i];
+        const idxStr = `${i}`;
+        span.dataset.wordIndex = idxStr;
+        span.dataset.wordStartIndex = idxStr;
+        span.dataset.wordEndIndex = idxStr;
+        if (word && word.start != null) span.dataset.start = `${Number(word.start)}`;
+        if (word && word.end != null) span.dataset.end = `${Number(word.end)}`;
+        if (span.classList.contains('mismatch')) {
+          span.classList.remove('mismatch');
+        }
+      }
+      for (let i = limit; i < spans.length; i += 1) {
+        spans[i].classList.remove('mismatch');
+      }
+    }
+
+    function sanitizePartsTimes(times) {
+      if (!Array.isArray(times) || !times.length) return [];
+      const sanitized = new Array(times.length);
+      let lastTime = -Infinity;
+      for (let i = 0; i < times.length; i += 1) {
+        const record = times[i];
+        if (!record || typeof record !== 'object') {
+          sanitized[i] = null;
+          continue;
+        }
+        const out = {};
+        const rawStart = Number(record.start);
+        const rawEnd = Number(record.end);
+        if (Number.isFinite(rawStart) && rawStart + 0.2 >= lastTime) {
+          out.start = rawStart;
+          lastTime = Math.max(lastTime, rawStart);
+        }
+        if (Number.isFinite(rawEnd)) {
+          if (out.start != null && rawEnd + 0.05 >= out.start && rawEnd + 0.2 >= lastTime) {
+            out.end = rawEnd;
+            lastTime = Math.max(lastTime, rawEnd);
+          } else if (out.start == null && rawEnd + 0.2 >= lastTime) {
+            out.end = rawEnd;
+            lastTime = Math.max(lastTime, rawEnd);
+          }
+        }
+        sanitized[i] = Object.keys(out).length ? out : null;
+      }
+      return sanitized;
+    }
+
+    function findWordIndexByTime(wordStartTimes, time, guess) {
+      if (!Number.isFinite(time) || !Array.isArray(wordStartTimes) || !wordStartTimes.length) {
+        return guess != null ? guess : null;
+      }
+      let lo = 0;
+      let hi = wordStartTimes.length - 1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const start = wordStartTimes[mid];
+        if (start == null) {
+          hi = mid - 1;
+          continue;
+        }
+        if (start < time) lo = mid + 1;
+        else hi = mid - 1;
+      }
+      const candidates = [];
+      if (lo < wordStartTimes.length) candidates.push(lo);
+      if (lo - 1 >= 0) candidates.push(lo - 1);
+      let bestIdx = null;
+      let bestDiff = Infinity;
+      candidates.forEach((idx) => {
+        const start = wordStartTimes[idx];
+        if (start == null) return;
+        const diff = Math.abs(start - time);
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          bestIdx = idx;
+        }
+      });
+      if (bestIdx != null && bestDiff <= 0.15) {
+        return bestIdx;
+      }
+      return guess != null ? guess : null;
+    }
+
+    function assignTimesFromParts(containerEl, words, partsTimes) {
+      if (!containerEl || !Array.isArray(words) || !words.length) return;
+      if (!Array.isArray(partsTimes) || !partsTimes.length) {
+        assignSequentialTimings(containerEl, words);
+        return;
+      }
+      const spans = Array.from(containerEl.querySelectorAll('.word'));
+      if (!spans.length) return;
+      const wordStartTimes = words.map((w) => (w && Number.isFinite(Number(w.start)) ? Number(w.start) : null));
+      const wordEndTimes = words.map((w) => (w && Number.isFinite(Number(w.end)) ? Number(w.end) : null));
+      let fallbackIdx = 0;
+
+      let lastValidStart = -Infinity;
+
+      spans.forEach((span) => {
+        const partIdx = resolveNumber(span.dataset.partIndex);
+        const t = partIdx != null ? partsTimes[partIdx] : null;
+        let startTime = t && Number.isFinite(Number(t.start)) ? Number(t.start) : null;
+        let endTime = t && Number.isFinite(Number(t.end)) ? Number(t.end) : null;
+
+        if (startTime != null && startTime + 0.2 < lastValidStart) {
+          startTime = null;
+        }
+
+        let startIdx = findWordIndexByTime(wordStartTimes, startTime, null);
+        if (startIdx == null && startTime == null) {
+          startIdx = fallbackIdx < words.length ? fallbackIdx : null;
+        }
+        if (startIdx == null && startTime != null) {
+          startIdx = findWordIndexByTime(wordStartTimes, startTime, fallbackIdx < words.length ? fallbackIdx : null);
+        }
+
+        let endIdx = findWordIndexByTime(wordStartTimes, endTime, startIdx);
+        if (endIdx == null && endTime != null) {
+          endIdx = findWordIndexByTime(wordEndTimes, endTime, startIdx);
+        }
+        if (endIdx == null) {
+          endIdx = startIdx != null ? startIdx : (fallbackIdx < words.length ? fallbackIdx : null);
+        }
+
+        if (startIdx != null) {
+          const idxStr = `${startIdx}`;
+          span.dataset.wordIndex = idxStr;
+          span.dataset.wordStartIndex = idxStr;
+          fallbackIdx = Math.max(fallbackIdx, startIdx + 1);
+        }
+        if (endIdx != null) {
+          span.dataset.wordEndIndex = `${endIdx}`;
+          fallbackIdx = Math.max(fallbackIdx, endIdx + 1);
+        }
+
+        if (startTime == null && startIdx != null) {
+          const w = words[startIdx];
+          if (w && w.start != null) startTime = Number(w.start);
+          if (w && w.end != null && endTime == null) endTime = Number(w.end);
+        }
+        if (endTime == null && endIdx != null) {
+          const w = words[endIdx];
+          if (w && w.end != null) endTime = Number(w.end);
+        }
+
+        if (startTime != null) span.dataset.start = `${startTime}`;
+        if (endTime != null) span.dataset.end = `${endTime >= (startTime ?? endTime) ? endTime : startTime}`;
+        span.classList.remove('mismatch');
+
+        if (startTime != null) {
+          lastValidStart = startTime;
+        } else if (span.dataset.start) {
+          const parsed = Number(span.dataset.start);
+          if (Number.isFinite(parsed)) lastValidStart = parsed;
+        }
+      });
+
+      if (fallbackIdx < words.length) {
+        for (let idx = fallbackIdx; idx < words.length && idx - fallbackIdx < spans.length; idx += 1) {
+          const span = spans[idx - fallbackIdx];
+          if (!span) break;
+          if (!span.dataset.start && words[idx] && words[idx].start != null) {
+            span.dataset.start = `${Number(words[idx].start)}`;
+          }
+          if (!span.dataset.end && words[idx] && words[idx].end != null) {
+            span.dataset.end = `${Number(words[idx].end)}`;
+          }
+        }
+      }
+    }
+
+    function renderKaraokeOriginal(audio, words, transcriptTextRaw, mapped, structuredEntries) {
       const container = getTranscriptContainer();
       if (!container) return;
       container.innerHTML = '';
+
+      const attachHighlightHandler = () => attachKaraokeHighlighter(container, audio, words);
+
+      const hasStructuredEntries = Array.isArray(structuredEntries) && structuredEntries.length;
+
+      const addPageMarker = (pageNum) => {
+          const marker = document.createElement('div');
+          marker.className = 'page-marker';
+          marker.textContent = `Page ${pageNum}`;
+          container.appendChild(marker);
+        };
+
+      let currentParagraph = null;
+      const ensureParagraph = () => {
+        if (currentParagraph) return;
+        currentParagraph = document.createElement('div');
+        currentParagraph.className = 'transcript-paragraph';
+        const p = document.createElement('p');
+        currentParagraph.appendChild(p);
+        container.appendChild(currentParagraph);
+      };
+
+      const flushParagraph = () => {
+        if (!currentParagraph) return;
+        const body = currentParagraph.querySelector('p');
+        const hasContent = body ? body.childNodes.length : currentParagraph.childNodes.length;
+        if (!hasContent) {
+          container.removeChild(currentParagraph);
+        }
+        currentParagraph = null;
+      };
+
       // Split transcript into word and non-word segments, preserving exact punctuation and newlines
       // Prefer the exact `mapped.parts` sent by backend (list) to ensure identical tokenization.
       let parts = [];
       if (mapped && Array.isArray(mapped.parts) && mapped.parts.length) {
         parts = mapped.parts;
       } else {
-        // Fallback: prefer backend-provided split_regex when available to ensure frontend/backend use the same tokenization.
         try {
           const backendRegex = mapped && mapped.split_regex ? mapped.split_regex : null;
           if (backendRegex) {
-            // backendRegex arrives as a string suitable for RegExp constructor (escape sequences preserved in JSON)
             const re = new RegExp(backendRegex, 'u');
             parts = transcriptTextRaw.split(re);
           } else {
             parts = transcriptTextRaw.split(/([\p{L}']+|[0-9][0-9.,–—-]*)/u);
           }
         } catch (e) {
-          // Fallback to the built-in pattern on any error
           parts = transcriptTextRaw.split(/([\p{L}']+|[0-9][0-9.,–—-]*)/u);
         }
       }
-      const norm = (s) => (s || '').toLocaleLowerCase().normalize('NFC').replace(/[^\p{L}']+/gu, '');
-      const rnorm = words.map(w => norm(w.word));
+      const norm = (s) => normalizeTokenForMapping(s).replace(/[0-9]/g, '');
       const NUM = {0:'zero',1:'one',2:'two',3:'three',4:'four',5:'five',6:'six',7:'seven',8:'eight',9:'nine'};
       const TEENS = {10:'ten',11:'eleven',12:'twelve',13:'thirteen',14:'fourteen',15:'fifteen',16:'sixteen',17:'seventeen',18:'eighteen',19:'nineteen'};
       const TENS = {2:'twenty',3:'thirty',4:'forty',5:'fifty',6:'sixty',7:'seventy',8:'eighty',9:'ninety'};
@@ -813,182 +1467,274 @@ function isSupportedTranscriptFile(file) {
         return [];
       }
       // Build flat transcript token list (normalized), expanding numeric tokens into words
-      const Tnorm = [];
-      const tokenMeta = []; // maps each token to its source part and position
-      const isAlpha = (s) => /^[\p{L}']+$/u.test(s);
-      const isNum = (s) => /^[0-9][0-9.,–—-]*$/.test(s);
+  const tokenInfos = [];
+  const isAlpha = (s) => /^[\p{L}']+$/u.test(s);
+  const isNum = (s) => /^[0-9][0-9.,–—-]*$/.test(s);
       parts.forEach((part, idx) => {
         if (!part) return;
         if (isAlpha(part)) {
-          Tnorm.push(norm(part));
-          tokenMeta.push({ partIndex: idx, type: 'alpha' });
+          tokenInfos.push({ partIndex: idx, type: 'alpha', normalized: norm(part), raw: part });
         } else if (isNum(part)) {
           const exp = expandNumberToWords(part);
           exp.forEach((w, k) => {
-            Tnorm.push(norm(w));
-            tokenMeta.push({ partIndex: idx, type: 'num', subIndex: k, total: exp.length });
+            tokenInfos.push({
+              partIndex: idx,
+              type: 'num',
+              subIndex: k,
+              total: exp.length,
+              normalized: norm(w),
+            });
           });
         }
       });
 
-      // Dynamic programming alignment in manageable blocks
-      function alignDP(T, R) {
-        const n = T.length, m = R.length;
-        const score = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
-        const back = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0)); // 0 diag, 1 up, 2 left
-        for (let i = 1; i <= n; i++) { score[i][0] = i; back[i][0] = 1; }
-        for (let j = 1; j <= m; j++) { score[0][j] = j; back[0][j] = 2; }
-        for (let i = 1; i <= n; i++) {
-          const Ti = T[i - 1];
-          for (let j = 1; j <= m; j++) {
-            const cost = (Ti === R[j - 1]) ? 0 : 1;
-            let v = score[i - 1][j - 1] + cost; let d = 0;
-            const up = score[i - 1][j] + 1; if (up < v) { v = up; d = 1; }
-            const left = score[i][j - 1] + 1; if (left < v) { v = left; d = 2; }
-            score[i][j] = v; back[i][j] = d;
-          }
-        }
-        const map = new Array(n).fill(-1);
-        let i = n, j = m;
-        while (i > 0 || j > 0) {
-          const d = back[i][j];
-          if (i > 0 && j > 0 && d === 0) { map[i - 1] = j - 1; i--; j--; }
-          else if (i > 0 && (j === 0 || d === 1)) { map[i - 1] = -1; i--; }
-          else { j--; }
-        }
-        return map;
+      const wordNorms = words.map(w => norm(w.word));
+      const wordStartTimes = words.map((w) => (w && Number.isFinite(Number(w.start)) ? Number(w.start) : null));
+      const MAX_LOOKAHEAD = 60;
+      let wordCursor = 0;
+      let retryBudget = 5;
+      const totalWords = wordNorms.length;
+
+      let backendPartTimes = null;
+      if (mapped && mapped.parts_times && Array.isArray(mapped.parts_times) && mapped.parts_times.length === parts.length) {
+        backendPartTimes = sanitizePartsTimes(mapped.parts_times);
       }
 
-      function alignBlocks(T, R, blockSize = 120, extra = 60) {
-        const out = new Array(T.length).fill(-1);
-        let rStart = 0; const Rlen = R.length;
-        for (let t0 = 0; t0 < T.length; t0 += blockSize) {
-          const t1 = Math.min(T.length, t0 + blockSize);
-          const subT = T.slice(t0, t1);
-          const windowLen = Math.min(Rlen - rStart, subT.length * 2 + extra);
-          const rEnd = rStart + Math.max(0, windowLen);
-          const subR = R.slice(rStart, rEnd);
-          const map = alignDP(subT, subR);
-          let last = -1;
-          for (let i = 0; i < map.length; i++) {
-            const j = map[i];
-            if (j >= 0) { out[t0 + i] = rStart + j; last = rStart + j; }
+      const tokenWordMap = tokenInfos.map((info, i) => {
+        const target = info.normalized;
+        if (!target) {
+          if (wordCursor < totalWords) {
+            const assigned = wordCursor;
+            wordCursor += 1;
+            return assigned;
           }
-          if (last >= 0) rStart = Math.max(last + 1 - 8, rStart);
-          else rStart = Math.min(Rlen, rStart + subT.length);
+          return -1;
         }
-        return out;
-      }
+
+        let matched = -1;
+        for (let offset = 0; offset < MAX_LOOKAHEAD && wordCursor + offset < totalWords; offset += 1) {
+          const candidate = wordCursor + offset;
+          if (wordNorms[candidate] === target) {
+            matched = candidate;
+            wordCursor = candidate + 1;
+            retryBudget = 5;
+            break;
+          }
+        }
+
+        if (matched === -1) {
+          const partTime = backendPartTimes && backendPartTimes[info.partIndex] && backendPartTimes[info.partIndex].start != null
+            ? Number(backendPartTimes[info.partIndex].start)
+            : null;
+          if (Number.isFinite(partTime)) {
+            let lo = Math.max(0, wordCursor);
+            let hi = totalWords - 1;
+            while (lo < hi) {
+              const mid = Math.floor((lo + hi) / 2);
+              const start = wordStartTimes[mid] != null ? wordStartTimes[mid] : -Infinity;
+              if (start < partTime) {
+                lo = mid + 1;
+              } else {
+                hi = mid;
+              }
+            }
+            const candidate = wordStartTimes[lo] != null ? lo : -1;
+            if (candidate >= wordCursor && candidate < totalWords) {
+              matched = candidate;
+              wordCursor = candidate + 1;
+              retryBudget = 5;
+            }
+          }
+        }
+
+        if (matched === -1) {
+          if (wordCursor < totalWords) {
+            matched = wordCursor;
+            wordCursor = Math.min(totalWords, wordCursor + 1);
+            if (retryBudget > 0) retryBudget -= 1;
+          } else {
+            matched = totalWords > 0 ? totalWords - 1 : -1;
+          }
+        }
+        return matched;
+      });
+
+      let tokenPtr = 0;
+      const consumeToken = () => {
+        if (tokenPtr >= tokenInfos.length) {
+          return { mapped: -1, info: null };
+        }
+        const info = tokenInfos[tokenPtr];
+        const mapped = tokenWordMap[tokenPtr];
+        tokenPtr += 1;
+        return { mapped, info };
+      };
 
       // If backend provided precise timings per split-part, use them when present,
       // but always compute a client-side token mapping as a fallback for parts
       // where the backend did not provide start/end timestamps.
-      let backendPartTimes = null;
-      if (mapped && mapped.parts_times && Array.isArray(mapped.parts_times) && mapped.parts_times.length === parts.length) {
-        backendPartTimes = mapped.parts_times;
-      }
-      const mapping = alignBlocks(Tnorm, rnorm);
-
+      // backendPartTimes already resolved above
       // Render by consuming mapping tokens in order and aggregating over number groups
-      let tokPtr = 0;
+      let pageNumber = 1;
+      addPageMarker(pageNumber);
+      flushParagraph();
+
+      const handleWhitespace = (text) => {
+        if (!text) return;
+        let remaining = text;
+        while (remaining.includes('\f')) {
+          const idx = remaining.indexOf('\f');
+          if (idx > 0) {
+            handleWhitespace(remaining.slice(0, idx));
+          }
+          flushParagraph();
+          pageNumber += 1;
+          addPageMarker(pageNumber);
+          remaining = remaining.slice(idx + 1);
+        }
+        if (!remaining) return;
+        const paragraphs = remaining.split(/\n{2,}/);
+        paragraphs.forEach((chunk, idx) => {
+          if (chunk) {
+            ensureParagraph();
+            const lines = chunk.split(/\n/);
+            lines.forEach((line, lineIdx) => {
+              if (!line) return;
+              ensureParagraph();
+              const p = currentParagraph.querySelector('p') || currentParagraph;
+              p.appendChild(document.createTextNode(line));
+              if (lineIdx < lines.length - 1) {
+                p.appendChild(document.createTextNode(' '));
+              }
+            });
+          }
+          if (idx < paragraphs.length - 1) {
+            flushParagraph();
+          }
+        });
+      };
+
+      let lastAssignedWordIdx = -1;
       parts.forEach((part, idx) => {
         if (!part) return;
+        if (/\f/.test(part) || /\n/.test(part)) {
+          handleWhitespace(part);
+          return;
+        }
         if (/^[\p{L}']+$/u.test(part)) {
-          let s = undefined, e = undefined, mismatch = false;
-          // Prefer backend times when available and complete; otherwise fall back to client mapping.
-          let usedBackend = false;
-          if (backendPartTimes) {
+          const consumed = consumeToken();
+          const mappedIdxRaw = Number.isInteger(consumed.mapped) ? consumed.mapped : -1;
+          let mappedIdx = mappedIdxRaw >= 0 ? Math.max(0, Math.min(words.length - 1, mappedIdxRaw)) : -1;
+          if (mappedIdx < 0 && words.length) {
+            mappedIdx = Math.min(words.length - 1, Math.max(0, lastAssignedWordIdx + 1));
+          }
+          const wordEntry = mappedIdx >= 0 ? words[mappedIdx] : null;
+          let s = wordEntry && wordEntry.start != null ? Number(wordEntry.start) : null;
+          let e = wordEntry && wordEntry.end != null ? Number(wordEntry.end) : null;
+
+          if ((s == null || e == null) && backendPartTimes) {
             const t = backendPartTimes[idx];
-            if (t && t.start != null && t.end != null) { s = t.start; e = t.end; usedBackend = true; }
+            if (t && t.start != null && t.end != null) {
+              if (s == null) s = Number(t.start);
+              if (e == null) e = Number(t.end);
+            }
           }
-          if (!usedBackend) {
-            const j = tokPtr < mapping.length ? mapping[tokPtr++] : -1;
-            const w = (j >= 0 ? words[j] : {}) || {};
-            s = w.start; e = w.end;
-            mismatch = (j < 0) || (norm(part) !== (j >= 0 ? rnorm[j] : ''));
-          } else {
-            // backend provided valid times -> consider it a match
-            mismatch = false;
-            // still advance token pointer to keep alignment with transcript tokens
-            tokPtr += 1;
-          }
+
+          const expected = consumed.info ? consumed.info.normalized : null;
+          const actual = (mappedIdx >= 0 && mappedIdx < wordNorms.length) ? wordNorms[mappedIdx] : null;
+          const usedFallback = mappedIdx !== mappedIdxRaw;
+          const mismatch = !usedFallback && expected && actual && expected !== actual;
+
           const span = document.createElement('span');
           span.className = 'word' + (mismatch ? ' mismatch' : '');
           span.textContent = part;
-          if (s != null) span.dataset.start = s;
-          if (e != null) span.dataset.end = e;
+          span.dataset.partIndex = `${idx}`;
+          if (mappedIdx >= 0) {
+            const idxStr = `${mappedIdx}`;
+            span.dataset.wordIndex = idxStr;
+            span.dataset.wordStartIndex = idxStr;
+            span.dataset.wordEndIndex = idxStr;
+            lastAssignedWordIdx = Math.max(lastAssignedWordIdx, mappedIdx);
+            if (words[mappedIdx] && words[mappedIdx].start != null) s = Number(words[mappedIdx].start);
+            if (words[mappedIdx] && words[mappedIdx].end != null) e = Number(words[mappedIdx].end);
+          }
+          if (s != null) span.dataset.start = `${s}`;
+          if (e != null) span.dataset.end = `${e}`;
           span.addEventListener('click', () => {
             if (span.dataset.start) setAudioCurrentTime(parseFloat(span.dataset.start));
           });
-          container.appendChild(span);
+          ensureParagraph();
+          const p = currentParagraph.querySelector('p') || currentParagraph;
+          p.appendChild(span);
         } else if (/^[0-9][0-9.,–—-]*$/.test(part)) {
-          let s = undefined, e = undefined, mismatch = false;
-          // Prefer backend times when available and complete; otherwise fallback to client mapping.
-          let usedBackendNum = false;
-          if (backendPartTimes) {
+          const exp = expandNumberToWords(part);
+          const consumedTokens = exp.map(() => consumeToken());
+          if (!consumedTokens.length) {
+            consumedTokens.push(consumeToken());
+          }
+          const mappedIndices = consumedTokens
+            .map(({ mapped }) => (Number.isInteger(mapped) ? mapped : -1))
+            .filter((val) => val >= 0 && val < words.length);
+          let firstIdx = mappedIndices.length ? Math.min(...mappedIndices) : -1;
+          let lastIdx = mappedIndices.length ? Math.max(...mappedIndices) : firstIdx;
+          if (firstIdx < 0 && words.length) {
+            firstIdx = Math.min(words.length - 1, Math.max(0, lastAssignedWordIdx + 1));
+          }
+          if (lastIdx < 0 && firstIdx >= 0) {
+            lastIdx = firstIdx;
+          }
+          let s = firstIdx >= 0 && words[firstIdx] && words[firstIdx].start != null ? Number(words[firstIdx].start) : null;
+          let e = lastIdx >= 0 && words[lastIdx] && words[lastIdx].end != null ? Number(words[lastIdx].end) : null;
+
+          if ((s == null || e == null) && backendPartTimes) {
             const t = backendPartTimes[idx];
-            if (t && t.start != null && t.end != null) { s = t.start; e = t.end; usedBackendNum = true; }
+            if (t && t.start != null && t.end != null) {
+              if (s == null) s = Number(t.start);
+              if (e == null) e = Number(t.end);
+            }
           }
-          if (!usedBackendNum) {
-            const exp = expandNumberToWords(part);
-            const idxs = [];
-            for (let k = 0; k < exp.length; k++) { idxs.push(tokPtr < mapping.length ? mapping[tokPtr++] : -1); }
-            const slice = idxs.filter(j => j >= 0).map(j => words[j]).filter(Boolean);
-            const starts = slice.map(x => x.start).filter(v => v != null);
-            const ends = slice.map(x => x.end).filter(v => v != null);
-            s = starts.length ? Math.min(...starts) : undefined;
-            e = ends.length ? Math.max(...ends) : undefined;
-            mismatch = idxs.some(j => j < 0);
-          } else {
-            // backend provided valid times -> consider it a match
-            mismatch = false;
-            // advance token pointer by expanded length so future client mappings stay aligned
-            const exp = expandNumberToWords(part);
-            tokPtr += exp.length;
-          }
+
+          const usedFallback = consumedTokens.some(({ mapped }) => !Number.isInteger(mapped) || mapped < 0 || mapped >= wordNorms.length);
+          const mismatch = !usedFallback && consumedTokens.some(({ mapped, info }) => {
+            if (!Number.isInteger(mapped) || mapped < 0 || mapped >= wordNorms.length) return false;
+            const expectedNorm = info ? info.normalized : null;
+            const actualNorm = wordNorms[mapped];
+            return Boolean(expectedNorm && actualNorm && expectedNorm !== actualNorm);
+          });
+
           const span = document.createElement('span');
           span.className = 'word number' + (mismatch ? ' mismatch' : '');
           span.textContent = part;
-          if (s != null) span.dataset.start = s;
-          if (e != null) span.dataset.end = e;
+          span.dataset.partIndex = `${idx}`;
+          if (s != null) span.dataset.start = `${s}`;
+          if (e != null) span.dataset.end = `${e}`;
+          if (firstIdx >= 0) span.dataset.wordStartIndex = `${firstIdx}`;
+          if (lastIdx >= 0) span.dataset.wordEndIndex = `${lastIdx}`;
+          if (firstIdx >= 0 && words[firstIdx] && words[firstIdx].start != null) s = Number(words[firstIdx].start);
+          if (lastIdx >= 0 && words[lastIdx] && words[lastIdx].end != null) e = Number(words[lastIdx].end);
+          if (lastIdx >= 0) lastAssignedWordIdx = Math.max(lastAssignedWordIdx, lastIdx);
           span.addEventListener('click', () => {
             if (span.dataset.start) setAudioCurrentTime(parseFloat(span.dataset.start));
           });
-          container.appendChild(span);
+          ensureParagraph();
+          const p = currentParagraph.querySelector('p') || currentParagraph;
+          p.appendChild(span);
         } else {
-          container.appendChild(document.createTextNode(part));
+          ensureParagraph();
+          const p = currentParagraph.querySelector('p') || currentParagraph;
+          p.appendChild(document.createTextNode(part));
         }
       });
 
-      audio.addEventListener('timeupdate', () => {
-        const current = getAudioCurrentTime(audio);
-        const spans = container.querySelectorAll('.word');
-        const EPS = 1e-3;
-        let activeIndex = -1;
-        for (let i = 0; i < spans.length; i++) {
-          const el = spans[i];
-          const s = parseFloat(el.dataset.start);
-          const e = parseFloat(el.dataset.end);
-          if (Number.isNaN(s) || Number.isNaN(e)) continue;
-          const isLast = i === spans.length - 1;
-          const inRange = current >= s && (isLast ? current <= e + EPS : current < e - EPS);
-          if (inRange) {
-            activeIndex = i;
-            break;
-          }
-        }
-        spans.forEach((el, idx) => {
-          if (idx === activeIndex) {
-            el.classList.add('highlighted');
-          } else {
-            el.classList.remove('highlighted');
-          }
-        });
-        if (activeIndex >= 0) {
-          const active = spans[activeIndex];
-          try { active.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (_) {}
-        }
-      });
+      flushParagraph();
+
+      if (hasStructuredEntries) {
+        regroupNodesByEntries(container, structuredEntries);
+      }
+
+      assignTimesFromParts(container, words, backendPartTimes);
+      attachHighlightHandler();
+      setupAudioControls(audio);
     }
 
 
@@ -1036,7 +1782,7 @@ function isSupportedTranscriptFile(file) {
           }
 
           if (raw && raw.text) {
-            renderKaraokeOriginal(syncedAudio, alignment.words, raw.text, alignment.mapped);
+            renderKaraokeOriginal(syncedAudio, alignment.words, raw.text, alignment.mapped, __entriesForActiveCase);
           } else {
             renderKaraoke(syncedAudio, alignment.words);
           }
@@ -1064,20 +1810,7 @@ function isSupportedTranscriptFile(file) {
     const spans = Array.from(container.querySelectorAll('.word'));
     if (!spans.length) return;
 
-    const LETTER_REGEX = /\p{L}/u;
-    const isLetterChar = (ch) => LETTER_REGEX.test(ch);
-    const isDigitChar = (ch) => ch >= '0' && ch <= '9';
-    const normalizeTokenValue = (value) => {
-      let out = '';
-      const source = String(value || '');
-      for (let i = 0; i < source.length; i += 1) {
-        const ch = source[i];
-        if (isLetterChar(ch) || isDigitChar(ch)) {
-          out += ch.toLocaleLowerCase();
-        }
-      }
-      return out;
-    };
+    const normalizeTokenValue = (value) => normalizeTokenForMapping(value);
 
     const spanInfos = spans
       .map((span, index) => ({

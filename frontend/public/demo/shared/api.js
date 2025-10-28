@@ -107,10 +107,13 @@ class LegalSyncAPI {
     }
 
     async downloadExternalComments(caseId, format = 'docx') {
-        const response = await fetch(this.baseUrl + `/cases/${caseId}/external-comments?format=${encodeURIComponent(format)}`, {
+        const cacheBuster = `_=${Date.now()}`;
+        const url = `${this.baseUrl}/cases/${caseId}/external-comments?format=${encodeURIComponent(format)}&${cacheBuster}`;
+        const response = await fetch(url, {
             headers: {
                 'Authorization': `Bearer ${sessionStorage.getItem('legalSyncToken')}`,
             },
+            cache: 'no-store',
         });
         if (!response.ok) {
             let message = 'Failed to export external comments';
