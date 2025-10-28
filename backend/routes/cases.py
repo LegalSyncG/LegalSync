@@ -249,7 +249,7 @@ def _load_transcript_text(transcript_file, transcript_text: Optional[str]) -> Tu
         if ext in {"", None}:
             text = _extract_text_from_plain(transcript_file)
             return text, {}
-        raise ValueError("Unsupported transcript file type. Upload TXT, DOCX, or Pages document.")
+        raise ValueError("Unsupported transcript file type. Upload TXT, DOCX, PDF, or Pages document.")
     if transcript_text:
         return transcript_text, {}
     return "", {}

@@ -592,7 +592,9 @@ const SUPPORTED_TRANSCRIPT_MIME = [
   'text/plain',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'application/pdf',
-  'application/vnd.apple.pages'
+  'application/vnd.apple.pages',
+  // Accept generic when browsers don't expose type
+  'application/octet-stream'
 ];
 
 function normalizeExtension(name = '') {
@@ -606,7 +608,10 @@ function isSupportedTranscriptFile(file) {
   const ext = normalizeExtension(file.name || '');
   if (ext && SUPPORTED_TRANSCRIPT_EXTENSIONS.includes(ext)) return true;
   const mime = (file.type || '').toLowerCase();
-  return SUPPORTED_TRANSCRIPT_MIME.includes(mime);
+  if (SUPPORTED_TRANSCRIPT_MIME.includes(mime)) return true;
+  // Be permissive if browser hides type/extension; let server validate
+  if (!ext && (!mime || mime === 'application/octet-stream')) return true;
+  return false;
 }
 
     // Update syncHighlight to set highlightedParagraphIndex
