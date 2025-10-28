@@ -40,6 +40,9 @@ class LegalSyncAPI {
         });
 
         if (!response.ok) {
+            if (response.status === 413) {
+                throw new Error('Upload too large. Please use smaller files or contact support to increase the limit.');
+            }
             const errorData = await response.json().catch(() => ({}));
             throw new Error(errorData.error || 'Failed to create case');
         }

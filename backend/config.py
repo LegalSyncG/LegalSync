@@ -12,7 +12,12 @@ class Config:
 
     # Uploads
     UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "./uploads")
-    MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # Max 50 MB uploads
+    # Allow overriding max upload size via env (bytes or MB). Defaults to 50MB.
+    MAX_CONTENT_LENGTH = (
+        int(os.getenv("MAX_CONTENT_LENGTH_BYTES") or 0)
+        or int(os.getenv("MAX_CONTENT_LENGTH") or 0)  # bytes, if set
+        or int(os.getenv("MAX_CONTENT_LENGTH_MB") or 50) * 1024 * 1024
+    )
 
     # CORS
     # Comma-separated origins in env, e.g. "http://localhost:8080,http://127.0.0.1:8080"
