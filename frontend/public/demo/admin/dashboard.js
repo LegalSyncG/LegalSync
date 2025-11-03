@@ -2407,19 +2407,37 @@ function setStage(caseId, status, counts = {}, options = {}) {
 let statusInterval = null;
 function startStatusPolling(caseId) {
   clearInterval(statusInterval);
-  const allowed = { queued:1, converting:1, splitting:1, aligning:1, building:1, done:1, failed:1 };
-
-  let pollingActive = true;
-  const tickStatus = async () => {
+  let pollCount = 0;
+  let lastStatus = null;
+  
+  // immediate tick
+  (async () => {
     try {
       const s = await API.getCaseStatus(caseId);
+      const allowed = { queued:1, converting:1, splitting:1, aligning:1, building:1 };
       if (s && s.status && allowed[s.status]) {
         setStage(caseId, s.status, { total_chunks: s.total_chunks, completed_chunks: s.completed_chunks });
+        lastStatus = s.status;
       } else {
         resetProgressUI();
       }
-      if (s && (s.status === 'done' || s.status === 'failed')) {
-        pollingActive = false;
+    } catch(_){}
+  })();
+  
+  statusInterval = setInterval(async () => {
+    try {
+      pollCount++;
+      const s = await API.getCaseStatus(caseId);
+      const allowed = { queued:1, converting:1, splitting:1, aligning:1, building:1 };
+      
+      if (s && s.status && allowed[s.status]) {
+        setStage(caseId, s.status, { total_chunks: s.total_chunks, completed_chunks: s.completed_chunks });
+        lastStatus = s.status;
+      } else {
+        resetProgressUI();
+      }
+      
+      if (s.status === 'done' || s.status === 'failed') {
         clearInterval(statusInterval);
         if (s.status === 'done' && activeCaseId === caseId) {
           try {
@@ -2428,11 +2446,12 @@ function startStatusPolling(caseId) {
           } catch (_) {}
         }
       }
+      
+      // Stop polling after 20 minutes to save resources
+      if (pollCount > 40) { // 40 * 30s = 20 minutes
+        clearInterval(statusInterval);
+        resetProgressUI();
+      }
     } catch (_) {}
-  };
-
-  tickStatus().then(() => {
-    if (!pollingActive) return;
-    statusInterval = setInterval(() => { tickStatus(); }, 1500);
-  });
+  }, 30000); // Set to 30 seconds (30000ms)
 }
