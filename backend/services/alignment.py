@@ -126,17 +126,17 @@ def _extract_wav_segment(src_wav: str, out_wav: str, start: float, end: float) -
 
 
 def _run_ffmpeg_to_wav(src_audio: str, dst_wav: str) -> None:
-    """Convert audio to 16kHz mono WAV using ffmpeg."""
+    """Convert audio to 16kHz mono WAV using ffmpeg.
+    Uses precise timing preservation to maintain sync with optimized MP3."""
     os.makedirs(os.path.dirname(dst_wav), exist_ok=True)
     cmd = [
         "ffmpeg",
         "-y",
         "-i",
         src_audio,
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
+        "-ac", "1",      # Convert to mono
+        "-ar", "16000",  # Resample to 16kHz for ASR
+        "-af", "aresample=resampler=soxr:precision=28",  # High-quality resampling
         dst_wav,
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

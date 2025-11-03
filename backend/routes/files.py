@@ -60,7 +60,7 @@ def create_case(user_id, name, nr):
     db.session.add(new_case)
     db.session.commit()
 
-@profile_bp.route('/stream/<int:file_id>', methods=['GET'])
+@profile_bp.route('/stream/<int:file_id>', methods=['GET', 'HEAD'])
 def stream_audio(file_id):
     """Stream audio with JWT auth.
     Preferred: Authorization: Bearer <token> header.
@@ -91,35 +91,55 @@ def stream_audio(file_id):
     file_size = os.path.getsize(path)
     range_header = request.headers.get('Range', None)
 
+    # Common headers for both full and partial content
+    response_headers = {
+        'Accept-Ranges': 'bytes',
+        'Content-Type': 'audio/mpeg',
+        'Cache-Control': 'public, max-age=31536000',  # Cache for 1 year
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+        'Access-Control-Allow-Headers': 'Range, Content-Range, Content-Length'
+    }
+
     if range_header:
-        byte_range = range_header.replace('bytes=', '').split('-')
-        start = int(byte_range[0])
-        end = int(byte_range[1]) if byte_range[1] else file_size - 1
-        length = end - start + 1
+        # Parse range header
+        try:
+            byte_range = range_header.replace('bytes=', '').split('-')
+            start = int(byte_range[0]) if byte_range[0] else 0
+            end = int(byte_range[1]) if byte_range[1] else file_size - 1
+            
+            # Ensure valid range
+            start = max(0, min(start, file_size - 1))
+            end = max(start, min(end, file_size - 1))
+            length = end - start + 1
 
-        with open(path, 'rb') as f:
-            f.seek(start)
-            data = f.read(length)
+            with open(path, 'rb') as f:
+                f.seek(start)
+                data = f.read(length)
 
-        return Response(
-            data,
-            206,
-            mimetype='audio/mpeg',
-            headers={
+            response_headers.update({
                 'Content-Range': f'bytes {start}-{end}/{file_size}',
-                'Accept-Ranges': 'bytes',
                 'Content-Length': str(length),
-            },
-        )
+            })
+
+            return Response(
+                data,
+                206,
+                headers=response_headers
+            )
+        except (ValueError, IndexError) as e:
+            # Invalid range header
+            return Response("Invalid Range header", 416, headers={
+                'Content-Range': f'bytes */{file_size}',
+                **response_headers
+            })
     else:
+        response_headers['Content-Length'] = str(file_size)
+        
         return Response(
             open(path, 'rb'),
             200,
-            mimetype='audio/mpeg',
-            headers={
-                'Content-Length': str(file_size),
-                'Accept-Ranges': 'bytes'
-            },
+            headers=response_headers
         )
 
 @profile_bp.route('/text/<int:file_id>', methods=['GET'])

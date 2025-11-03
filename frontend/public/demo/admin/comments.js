@@ -660,8 +660,30 @@ function sanitizePartsTimes(times) {
     function configureAudioForCase(caseData) {
       if (!paragraphAudio || !caseData) return;
       const token = sessionStorage.getItem('legalSyncToken');
-      paragraphAudio.preload = 'auto';
+      
+      // Safari-specific improvements
+      paragraphAudio.preload = 'metadata';
+      paragraphAudio.crossOrigin = 'anonymous';
       paragraphAudio.src = `${window.location.origin}/stream/${caseData.audio_file}?token=${encodeURIComponent(token || '')}`;
+      
+      // Add error handling for Safari
+      const handleAudioError = (error) => {
+        console.warn('Paragraph audio loading error:', error);
+        setTimeout(() => {
+          try {
+            paragraphAudio.load();
+          } catch (e) {
+            console.error('Paragraph audio reload failed:', e);
+          }
+        }, 1000);
+      };
+
+      paragraphAudio.addEventListener('error', handleAudioError);
+      paragraphAudio.addEventListener('stalled', () => {
+        console.warn('Paragraph audio loading stalled');
+        setTimeout(() => paragraphAudio.load(), 500);
+      });
+
       // Install a single guard that pauses playback at segment end
       if (!configureAudioForCase._installed) {
         paragraphAudio.addEventListener('timeupdate', () => {

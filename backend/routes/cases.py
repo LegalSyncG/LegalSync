@@ -745,6 +745,50 @@ def create_case():
     # Save audio
     audio_path = os.path.join(case_dir, "audio.mp3")
     audio.save(audio_path)
+    
+    # Re-encode audio for Safari compatibility AND create WAV for alignment from same source
+    # This ensures consistent timing between MP3 (for streaming) and WAV (for alignment)
+    optimized_audio_path = os.path.join(case_dir, "audio_optimized.mp3")
+    try:
+        import subprocess
+        import logging
+        
+        # Get original file info for logging
+        try:
+            result = subprocess.run([
+                "ffprobe", "-v", "quiet", "-show_entries", "format=duration,bit_rate",
+                "-of", "csv=p=0", audio_path
+            ], capture_output=True, text=True, check=True)
+            original_info = result.stdout.strip()
+            logging.info(f"Original audio info: {original_info}")
+        except:
+            pass
+            
+        # Create optimized MP3 for Safari compatibility (same format as sample files)
+        # Use precise settings to minimize timing drift
+        subprocess.run([
+            "ffmpeg", 
+            "-i", audio_path,
+            "-c:a", "mp3",
+            "-b:a", "64k",  # Same bitrate as sample files
+            "-ar", "44100", # Same sample rate as sample files
+            "-ac", "2",     # Stereo
+            "-avoid_negative_ts", "make_zero",  # Ensure consistent timing
+            "-fflags", "+genpts",  # Generate proper timestamps
+            "-y",           # Overwrite output
+            optimized_audio_path
+        ], check=True, capture_output=True)
+        
+        # Replace original with optimized version
+        os.replace(optimized_audio_path, audio_path)
+        logging.info(f"Successfully optimized audio for case {new_case.id}")
+        
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        # If ffmpeg fails, continue with original file
+        import logging
+        logging.warning(f"Failed to optimize audio file for case {new_case.id}: {e}")
+        if os.path.exists(optimized_audio_path):
+            os.remove(optimized_audio_path)
 
     # Save transcript.txt (normalizing DOCX/PAGES uploads to plain text)
     transcript_txt_path = os.path.join(case_dir, "transcript.txt")

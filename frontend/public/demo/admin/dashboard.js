@@ -242,10 +242,25 @@
       }
 
       if (!node.dataset.lsBound) {
-        node.addEventListener('loadedmetadata', () => updateAudioUI(node));
+        // Add timeout for loading metadata (Safari may take longer)
+        let metadataTimeout = setTimeout(() => {
+          console.warn('Audio metadata loading timeout, forcing load');
+          try {
+            node.load();
+          } catch (e) {
+            console.error('Failed to reload audio:', e);
+          }
+        }, 10000); // 10 second timeout
+
+        node.addEventListener('loadedmetadata', () => {
+          clearTimeout(metadataTimeout);
+          updateAudioUI(node);
+        });
+        
         node.addEventListener('timeupdate', () => {
           if (!isAudioScrubbing) updateAudioUI(node);
         });
+        
         node.addEventListener('play', () => {
           startAudioTicker(node);
           updateAudioUI(node);
@@ -1759,6 +1774,30 @@ function isSupportedTranscriptFile(file) {
     transcriptText.textContent = 'Loading transcript...';
     const token = sessionStorage.getItem('legalSyncToken');
     audioSource.src = `${window.location.origin}/stream/${data.audio_file}?token=${encodeURIComponent(token)}`;
+
+    // Safari-specific audio loading improvements
+    audio.preload = 'metadata';
+    audio.crossOrigin = 'anonymous';
+    
+    // Add error handling for Safari
+    const handleAudioError = (error) => {
+      console.warn('Audio loading error, attempting reload:', error);
+      // Retry loading after a short delay
+      setTimeout(() => {
+        try {
+          audio.load();
+        } catch (e) {
+          console.error('Audio reload failed:', e);
+          showNotification('Audio loading failed. Please try refreshing the page.', 'error');
+        }
+      }, 1000);
+    };
+
+    audio.addEventListener('error', handleAudioError, { once: true });
+    audio.addEventListener('stalled', () => {
+      console.warn('Audio loading stalled, attempting reload');
+      setTimeout(() => audio.load(), 500);
+    }, { once: true });
 
     audio.load();
     setupAudioControls(audio);
