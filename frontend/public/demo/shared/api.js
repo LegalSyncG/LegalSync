@@ -40,6 +40,9 @@ class LegalSyncAPI {
         });
 
         if (!response.ok) {
+            if (response.status === 413) {
+                throw new Error('Upload too large. Please use smaller files or contact support to increase the limit.');
+            }
             const errorData = await response.json().catch(() => ({}));
             throw new Error(errorData.error || 'Failed to create case');
         }
@@ -104,6 +107,32 @@ class LegalSyncAPI {
             throw new Error(err.error || 'Failed to rename case');
         }
         return response.json();
+    }
+
+    async downloadExternalComments(caseId, format = 'docx') {
+        const cacheBuster = `_=${Date.now()}`;
+        const url = `${this.baseUrl}/cases/${caseId}/external-comments?format=${encodeURIComponent(format)}&${cacheBuster}`;
+        const response = await fetch(url, {
+            headers: {
+                'Authorization': `Bearer ${sessionStorage.getItem('legalSyncToken')}`,
+            },
+            cache: 'no-store',
+        });
+        if (!response.ok) {
+            let message = 'Failed to export external comments';
+            try {
+                const errorData = await response.json();
+                if (errorData && (errorData.error || errorData.message)) {
+                    message = errorData.error || errorData.message;
+                }
+            } catch (_) {
+                // ignore parsing errors
+            }
+            const error = new Error(message);
+            error.status = response.status;
+            throw error;
+        }
+        return response;
     }
 
     async postProtected(url, options = {}) {

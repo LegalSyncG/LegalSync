@@ -19,6 +19,105 @@
     const cancelEditBtn = document.getElementById('cancelEditBtn');
     const cancelSelectBtn = document.getElementById('cancelSelectBtn');
     const paragraphAudio = document.getElementById('paragraphAudio');
+    const READY_STORAGE_KEY = 'ls_case_ready_map';
+    const READY_SEEN_SESSION_KEY = 'ls_ready_seen_map';
+
+    function readJSON(key, fallback) {
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) return fallback;
+        return JSON.parse(raw);
+      } catch (_) {
+        return fallback;
+      }
+    }
+
+    function writeJSON(key, value) {
+      try {
+        localStorage.setItem(key, JSON.stringify(value));
+      } catch (_) {}
+    }
+
+    function readSessionJSON(key, fallback) {
+      try {
+        const raw = sessionStorage.getItem(key);
+        if (!raw) return fallback;
+        return JSON.parse(raw);
+      } catch (_) {
+        return fallback;
+      }
+    }
+
+    function writeSessionJSON(key, value) {
+      try {
+        sessionStorage.setItem(key, JSON.stringify(value));
+      } catch (_) {}
+    }
+
+    let readySeen = readSessionJSON(READY_SEEN_SESSION_KEY, {});
+    let currentCaseName = '';
+
+    function announceReadyUpdates(map) {
+      if (!map) return;
+      let updated = false;
+      Object.entries(map).forEach(([caseKey, payload]) => {
+        if (!payload || payload.readyAt == null) return;
+        const readyStamp = Number(payload.readyAt) || 0;
+        const seen = Number(readySeen[caseKey]) || 0;
+        if (readyStamp > seen) {
+          const name = payload.caseName || `Case ${caseKey}`;
+          showNotification(`"${name}" is ready to review.`, 'success');
+          readySeen[caseKey] = readyStamp;
+          updated = true;
+        }
+      });
+      if (updated) {
+        writeSessionJSON(READY_SEEN_SESSION_KEY, readySeen);
+      }
+    }
+
+    function recordCaseReady(caseId, caseName, readyAt) {
+      if (!caseId) return;
+      const map = readJSON(READY_STORAGE_KEY, {});
+      const key = String(caseId);
+      const existing = map[key] || {};
+      const existingStamp = Number(existing.readyAt) || 0;
+      let nextStamp = readyAt != null ? Number(readyAt) : NaN;
+      if (!Number.isFinite(nextStamp)) {
+        if (existingStamp) {
+          if (caseName && (!existing.caseName || existing.caseName !== caseName)) {
+            existing.caseName = caseName;
+            map[key] = existing;
+            writeJSON(READY_STORAGE_KEY, map);
+          }
+          return;
+        }
+        nextStamp = Date.now();
+      } else if (existingStamp && nextStamp <= existingStamp) {
+        if (caseName && (!existing.caseName || existing.caseName !== caseName)) {
+          existing.caseName = caseName;
+          map[key] = existing;
+          writeJSON(READY_STORAGE_KEY, map);
+        }
+        return;
+      }
+      const resolvedName = caseName || existing.caseName || `Case ${caseId}`;
+      map[key] = { caseName: resolvedName, readyAt: nextStamp };
+      writeJSON(READY_STORAGE_KEY, map);
+      announceReadyUpdates(map);
+    }
+
+    function initReadyNotifications() {
+      announceReadyUpdates(readJSON(READY_STORAGE_KEY, {}));
+      window.addEventListener('storage', (event) => {
+        if (event.key === READY_STORAGE_KEY) {
+          try {
+            const map = event.newValue ? JSON.parse(event.newValue) : {};
+            announceReadyUpdates(map);
+          } catch (_) {}
+        }
+      });
+    }
 
     let currentSelection = { entryIndex: null, start: null, end: null };
     let transcriptData = [];
@@ -26,8 +125,537 @@
     let activeComment = null;
 
     // Inline segment playback state
-    let segmentGuard = { enabled: false, end: 0 };
+    let segmentGuard = { enabled: false, start: 0, end: 0 };
     let currentlyPlayingIndex = null;
+
+    // Alignment-derived helpers
+    const LETTER_REGEX = /\p{L}/u;
+    const NUMBER_CHARS = new Set(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '.', ',', '-', '–', '—', '·']);
+let partsTimesGlobal = [];
+let wordPartRangesByEntry = [];
+let wordLocationsByEntry = [];
+
+function sanitizePartsTimes(times) {
+  if (!Array.isArray(times) || !times.length) return [];
+  const sanitized = new Array(times.length);
+  let lastTime = -Infinity;
+  for (let i = 0; i < times.length; i += 1) {
+    const record = times[i];
+    if (!record || typeof record !== 'object') {
+      sanitized[i] = null;
+      continue;
+    }
+    const out = {};
+    const rawStart = Number(record.start);
+    const rawEnd = Number(record.end);
+    if (Number.isFinite(rawStart) && rawStart + 0.2 >= lastTime) {
+      out.start = rawStart;
+      lastTime = Math.max(lastTime, rawStart);
+    }
+    if (Number.isFinite(rawEnd)) {
+      if (out.start != null && rawEnd + 0.05 >= out.start && rawEnd + 0.2 >= lastTime) {
+        out.end = rawEnd;
+        lastTime = Math.max(lastTime, rawEnd);
+      } else if (out.start == null && rawEnd + 0.2 >= lastTime) {
+        out.end = rawEnd;
+        lastTime = Math.max(lastTime, rawEnd);
+      }
+    }
+    sanitized[i] = Object.keys(out).length ? out : null;
+  }
+  return sanitized;
+}
+
+    initReadyNotifications();
+
+    function isLetterChar(ch) {
+      return LETTER_REGEX.test(ch);
+    }
+
+    function isNumberChar(ch) {
+      return NUMBER_CHARS.has(ch);
+    }
+
+    function isDigitChar(ch) {
+      return ch >= '0' && ch <= '9';
+    }
+
+    function splitPartsWithPositions(text = '') {
+      const parts = [];
+      let buffer = '';
+      let bufferStart = 0;
+      let mode = null; // 'alpha' | 'num' | null
+
+      const flush = () => {
+        if (!buffer) return;
+        parts.push({ value: buffer, start: bufferStart, end: bufferStart + buffer.length });
+        buffer = '';
+      };
+
+      for (let i = 0; i < text.length; i += 1) {
+        const ch = text[i];
+        if (isLetterChar(ch) || ch === "'") {
+          if (mode !== 'alpha') {
+            flush();
+            mode = 'alpha';
+            bufferStart = i;
+          }
+          buffer += ch;
+        } else if (isNumberChar(ch)) {
+          if (mode !== 'num') {
+            flush();
+            mode = 'num';
+            bufferStart = i;
+          }
+          buffer += ch;
+        } else {
+          flush();
+          mode = null;
+          parts.push({ value: ch, start: i, end: i + 1 });
+        }
+      }
+
+      const flushFinal = () => {
+        if (!buffer) return;
+        parts.push({ value: buffer, start: bufferStart, end: bufferStart + buffer.length });
+        buffer = '';
+      };
+
+      flushFinal();
+      return parts;
+    }
+
+    function extractUiWordsWithPositions(text = '') {
+      const result = [];
+      const re = /\S+/g;
+      let match;
+      while ((match = re.exec(text)) !== null) {
+        result.push({
+          value: match[0],
+          start: match.index,
+          end: match.index + match[0].length,
+        });
+      }
+      return result;
+    }
+
+    function isWordPartValue(value) {
+      if (!value) return false;
+      for (const ch of value) {
+        if (isLetterChar(ch) || isDigitChar(ch)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function normalizeTokenValue(token) {
+      let out = '';
+      for (const ch of token || '') {
+        if (isLetterChar(ch) || isDigitChar(ch)) {
+          out += ch.toLowerCase();
+        }
+      }
+      return out;
+    }
+
+    function extractRawTokensWithLineInfo(text = '') {
+      const tokens = [];
+      let idx = 0;
+      let page = 1;
+      let line = 0;
+      let linePending = true;
+      let wordInLine = 0;
+
+      while (idx < text.length) {
+        const ch = text[idx];
+        if (ch === '\f') {
+          page += 1;
+          line = 0;
+          wordInLine = 0;
+          linePending = true;
+          idx += 1;
+          continue;
+        }
+        if (ch === '\r') {
+          idx += 1;
+          continue;
+        }
+        if (ch === '\n') {
+          linePending = true;
+          wordInLine = 0;
+          idx += 1;
+          continue;
+        }
+        if (/\s/.test(ch)) {
+          idx += 1;
+          continue;
+        }
+
+        const start = idx;
+        while (idx < text.length) {
+          const c = text[idx];
+          if (c === '\f' || c === '\n' || c === '\r' || /\s/.test(c)) break;
+          idx += 1;
+        }
+        const value = text.slice(start, idx);
+        if (!value) continue;
+
+        if (linePending) {
+          line += 1;
+          linePending = false;
+        }
+
+        const normalized = normalizeTokenValue(value);
+        let wordNumber = null;
+        if (normalized) {
+          wordInLine += 1;
+          wordNumber = wordInLine;
+        }
+
+        tokens.push({
+          value,
+          normalized,
+          page,
+          line,
+          wordInLine: wordNumber,
+        });
+      }
+
+      return tokens;
+    }
+
+    function buildWordLocations(entries, rawTranscript) {
+      const locations = entries.map(() => []);
+      if (typeof rawTranscript !== 'string') {
+        return locations;
+      }
+
+      const rawTokens = extractRawTokensWithLineInfo(rawTranscript);
+      let rawIdx = 0;
+
+      entries.forEach((entry, entryIndex) => {
+        const words = extractUiWordsWithPositions(entry?.text || '');
+        const entryLocations = locations[entryIndex];
+        const entryPage = Number.isFinite(Number(entry?.page)) ? Number(entry.page) : null;
+        let lastKnownLocation = null;
+
+        words.forEach(({ value }, ordinal) => {
+          const normalized = normalizeTokenValue(value);
+          if (!normalized) {
+            entryLocations[ordinal] = lastKnownLocation;
+            return;
+          }
+
+          let matched = null;
+          while (rawIdx < rawTokens.length) {
+            const candidate = rawTokens[rawIdx];
+            rawIdx += 1;
+            if (!candidate.normalized) {
+              continue;
+            }
+            matched = candidate;
+            break;
+          }
+
+          if (!matched) {
+            entryLocations[ordinal] = lastKnownLocation;
+            return;
+          }
+
+          const page = entryPage ?? matched.page ?? 1;
+          const line = matched.line ?? null;
+          const wordInLine = matched.wordInLine ?? null;
+          const loc = { page, line, wordInLine };
+          entryLocations[ordinal] = loc;
+          lastKnownLocation = loc;
+        });
+      });
+
+      return locations;
+    }
+
+    function sanitizeStoredWordLocation(raw, fallbackPage) {
+      if (!raw || typeof raw !== 'object') return null;
+      const pageCandidate = Number(raw.page ?? raw.page_number ?? raw.p ?? raw.pg);
+      const lineCandidate = Number(raw.line_on_page ?? raw.line ?? raw.lineNumber ?? raw.l);
+      const wordCandidate = Number(raw.word_in_line ?? raw.wordInLine ?? raw.word ?? raw.w);
+      const page = Number.isFinite(pageCandidate)
+        ? pageCandidate
+        : Number.isFinite(fallbackPage)
+          ? fallbackPage
+          : null;
+      const line = Number.isFinite(lineCandidate) ? lineCandidate : null;
+      const wordInLine = Number.isFinite(wordCandidate) ? wordCandidate : null;
+      return { page, line, wordInLine };
+    }
+
+    function prepareAlignmentMetadata(entries, alignmentPayload, rawTranscript) {
+      partsTimesGlobal = Array.isArray(alignmentPayload?.mapped?.parts_times)
+        ? sanitizePartsTimes(alignmentPayload.mapped.parts_times)
+        : [];
+      wordPartRangesByEntry = [];
+      wordLocationsByEntry = [];
+
+      let cumulativeParts = 0;
+
+      entries.forEach((entry, entryIndex) => {
+        const parts = splitPartsWithPositions(entry?.text || '');
+        const words = extractUiWordsWithPositions(entry?.text || '');
+        const ranges = [];
+        let partCursor = 0;
+
+        words.forEach(({ start, end }) => {
+          while (partCursor < parts.length && parts[partCursor].end <= start) {
+            partCursor += 1;
+          }
+          let first = null;
+          let last = null;
+          let idx = partCursor;
+          while (idx < parts.length && parts[idx].start < end) {
+            if (isWordPartValue(parts[idx].value)) {
+              const globalIdx = cumulativeParts + idx;
+              if (first === null) first = globalIdx;
+              last = globalIdx;
+            }
+            idx += 1;
+          }
+          ranges.push({ first, last });
+          partCursor = idx;
+        });
+
+        wordPartRangesByEntry[entryIndex] = ranges;
+
+        cumulativeParts += parts.length;
+      });
+
+      const fallbackWordLocations = buildWordLocations(entries, rawTranscript);
+      wordLocationsByEntry = fallbackWordLocations.map((locs) => Array.isArray(locs) ? [...locs] : []);
+
+      entries.forEach((entry, entryIndex) => {
+        const provided = Array.isArray(entry?.word_locations) ? entry.word_locations : null;
+        if (!provided || !provided.length) {
+          return;
+        }
+        const entryPage = Number.isFinite(Number(entry?.page)) ? Number(entry.page) : null;
+        const sanitized = provided.map((loc) => sanitizeStoredWordLocation(loc, entryPage));
+        const hasData = sanitized.some((loc) => loc !== null);
+        if (!hasData) return;
+
+        // Ensure length matches the number of words; otherwise fall back.
+        const expectedLength = extractUiWordsWithPositions(entry?.text || '').length;
+        if (sanitized.length === expectedLength) {
+          const fallbackEntry = Array.isArray(fallbackWordLocations[entryIndex]) ? fallbackWordLocations[entryIndex] : [];
+          const merged = sanitized.map((loc, ord) => {
+            const base = (fallbackEntry && fallbackEntry[ord]) || null;
+            const basePage = base && Number.isFinite(Number(base.page)) ? Number(base.page) : null;
+            const locPage = loc && Number.isFinite(Number(loc.page)) ? Number(loc.page) : null;
+            const page = basePage ?? locPage ?? entryPage;
+            const baseLine = base && Number.isFinite(Number(base.line)) ? Number(base.line) : null;
+            const locLine = loc && Number.isFinite(Number(loc.line)) ? Number(loc.line) : null;
+            const line = baseLine ?? locLine ?? null;
+            const baseWordInLine = base && Number.isFinite(Number(base.wordInLine)) ? Number(base.wordInLine) : null;
+            const locWordInLine = loc && Number.isFinite(Number(loc.wordInLine)) ? Number(loc.wordInLine) : null;
+            const wordInLine = locWordInLine ?? baseWordInLine ?? null;
+            if (page == null && entryPage != null) {
+              return { page: entryPage, line, wordInLine };
+            }
+            return { page, line, wordInLine };
+          });
+          wordLocationsByEntry[entryIndex] = merged;
+        }
+      });
+
+      // Ensure pages are monotonic across entries and fill gaps
+      let runningPage = 1;
+      wordLocationsByEntry.forEach((locations, entryIndex) => {
+        if (!Array.isArray(locations) || locations.length === 0) {
+          if (Number.isFinite(Number(entries[entryIndex]?.page))) {
+            runningPage = Math.max(runningPage, Number(entries[entryIndex].page));
+          }
+          return;
+        }
+        let entryPage = null;
+        locations.forEach((loc) => {
+          if (!loc || typeof loc !== 'object') return;
+          const locPage = Number(loc.page);
+          if (Number.isFinite(locPage)) {
+            if (locPage < runningPage) {
+              loc.page = runningPage;
+            } else {
+              runningPage = locPage;
+              loc.page = runningPage;
+            }
+          } else {
+            loc.page = runningPage;
+          }
+          if (entryPage == null && loc.page != null) {
+            entryPage = loc.page;
+          }
+        });
+        if (entryPage == null) {
+          entryPage = runningPage;
+        }
+        entries[entryIndex].page = entryPage;
+      });
+    }
+
+    function resolveBoundaryTime(globalPartIndex, boundary) {
+      if (
+        globalPartIndex == null ||
+        !Array.isArray(partsTimesGlobal) ||
+        globalPartIndex < 0 ||
+        globalPartIndex >= partsTimesGlobal.length
+      ) {
+        return null;
+      }
+      const record = partsTimesGlobal[globalPartIndex];
+      const direct = record && Number.isFinite(record[boundary]) ? Number(record[boundary]) : null;
+      if (direct != null) {
+        return direct;
+      }
+
+      let prev = null;
+      for (let i = globalPartIndex - 1; i >= 0; i -= 1) {
+        const candidate = partsTimesGlobal[i];
+        if (!candidate) continue;
+        if (Number.isFinite(candidate[boundary])) {
+          prev = Number(candidate[boundary]);
+          break;
+        }
+        if (Number.isFinite(candidate.end)) {
+          prev = Number(candidate.end);
+          break;
+        }
+        if (Number.isFinite(candidate.start)) {
+          prev = Number(candidate.start);
+          break;
+        }
+      }
+
+      let next = null;
+      for (let i = globalPartIndex + 1; i < partsTimesGlobal.length; i += 1) {
+        const candidate = partsTimesGlobal[i];
+        if (!candidate) continue;
+        if (Number.isFinite(candidate[boundary])) {
+          next = Number(candidate[boundary]);
+          break;
+        }
+        if (Number.isFinite(candidate.start)) {
+          next = Number(candidate.start);
+          break;
+        }
+        if (Number.isFinite(candidate.end)) {
+          next = Number(candidate.end);
+          break;
+        }
+      }
+
+      if (prev != null && next != null) {
+        return (prev + next) / 2;
+      }
+      return prev ?? next ?? null;
+    }
+
+    function formatTimestamp(seconds) {
+      if (!Number.isFinite(seconds)) return null;
+      const sign = seconds < 0 ? '-' : '';
+      const abs = Math.abs(seconds);
+      const hours = Math.floor(abs / 3600);
+      const minutes = Math.floor((abs % 3600) / 60);
+      const secs = abs % 60;
+      const secStr = secs.toFixed(2).padStart(5, '0');
+      if (hours > 0) {
+        return `${sign}${hours}:${String(minutes).padStart(2, '0')}:${secStr}`;
+      }
+      return `${sign}${String(minutes).padStart(2, '0')}:${secStr}`;
+    }
+
+    function formatTimeRange(start, end) {
+      const startStr = formatTimestamp(start);
+      const endStr = formatTimestamp(end);
+      if (startStr && endStr) {
+        if (startStr === endStr) return startStr;
+        return `${startStr} – ${endStr}`;
+      }
+      return startStr || endStr || null;
+    }
+
+    function getWordLocationMeta(entryIndex, ordinal) {
+      if (ordinal == null || !Number.isInteger(ordinal) || ordinal < 0) return null;
+      const locations = wordLocationsByEntry[entryIndex];
+      if (!locations) return null;
+      return locations[ordinal] || null;
+    }
+
+    function getWordRangeTimes(entryIndex, startOrd, endOrd) {
+      const ranges = wordPartRangesByEntry[entryIndex];
+      if (!ranges || ranges.length === 0) {
+        return { start: null, end: null };
+      }
+      const safeStart = Math.max(0, Math.min(startOrd, ranges.length - 1));
+      const safeEnd = Math.max(0, Math.min(endOrd, ranges.length - 1));
+      const startRange = ranges[safeStart];
+      const endRange = ranges[safeEnd];
+      const startTime = resolveBoundaryTime(startRange?.first ?? null, 'start');
+      const endTime = resolveBoundaryTime(endRange?.last ?? null, 'end');
+      return { start: startTime, end: endTime };
+    }
+
+    function formatLocationSummary(entryIndex, startOrd, endOrd, entry) {
+      const startLoc = getWordLocationMeta(entryIndex, startOrd);
+      const endLoc = getWordLocationMeta(entryIndex, endOrd);
+      const fallbackPage = Number.isFinite(Number(entry?.page)) ? Number(entry.page) : null;
+      const fallbackLine = Number.isFinite(Number(entry?.line_on_page)) ? Number(entry.line_on_page) : null;
+
+      const startPage = startLoc?.page ?? fallbackPage;
+      const endPage = endLoc?.page ?? startPage ?? fallbackPage;
+      let pageLabel = null;
+      if (startPage != null && endPage != null) {
+        pageLabel = startPage === endPage ? `Page ${startPage}` : `Pages ${startPage}–${endPage}`;
+      } else if (startPage != null) {
+        pageLabel = `Page ${startPage}`;
+      } else if (endPage != null) {
+        pageLabel = `Page ${endPage}`;
+      }
+
+      const startLine = startLoc?.line ?? fallbackLine;
+      const endLine = endLoc?.line ?? startLine ?? fallbackLine;
+      let lineLabel = null;
+      if (startLine != null && endLine != null) {
+        lineLabel = startLine === endLine ? `Line ${startLine}` : `Lines ${startLine}–${endLine}`;
+      } else if (startLine != null) {
+        lineLabel = `Line ${startLine}`;
+      } else if (endLine != null) {
+        lineLabel = `Line ${endLine}`;
+      }
+
+      const startWord = startLoc?.wordInLine ?? null;
+      const endWord = endLoc?.wordInLine ?? startWord;
+      let wordsLabel = null;
+      if (startWord != null && endWord != null) {
+        if (startLine != null && endLine != null && startLine !== endLine) {
+          wordsLabel = `Words ${startWord}@L${startLine}–${endWord}@L${endLine}`;
+        } else {
+          wordsLabel = startWord === endWord ? `Word ${startWord}` : `Words ${startWord}–${endWord}`;
+        }
+      } else if (startWord != null) {
+        wordsLabel = `Word ${startWord}`;
+      } else if (endWord != null) {
+        wordsLabel = `Word ${endWord}`;
+      }
+
+      const bits = [];
+      if (pageLabel) bits.push(pageLabel);
+      if (lineLabel) bits.push(lineLabel);
+      if (wordsLabel) {
+        bits.push(wordsLabel);
+      } else {
+        bits.push(`Words ${startOrd + 1}-${endOrd + 1}`);
+      }
+
+      return bits.join(' • ');
+    }
 
     function configureAudioForCase(caseData) {
       if (!paragraphAudio || !caseData) return;
@@ -58,20 +686,40 @@
 
     function playSegment(start, end) {
       if (!paragraphAudio) return;
-      // Ensure metadata loaded before seeking (some browsers)
-      const seekAndPlay = () => {
-        try { paragraphAudio.currentTime = Math.max(0, start || 0); } catch (_) {}
-        segmentGuard.end = Math.max(0, end || 0);
-        segmentGuard.enabled = Number.isFinite(segmentGuard.end) && segmentGuard.end > (start || 0);
-        paragraphAudio.play().catch(() => {/* user gesture may be required */});
+      const safeStart = Number.isFinite(start) ? Number(start) : 0;
+      const paddedStart = Math.max(0, safeStart - 0.35);
+      const safeEnd = Number.isFinite(end) ? Number(end) : null;
+
+      const beginPlayback = () => {
+        segmentGuard.start = safeStart;
+        segmentGuard.end = safeEnd != null ? safeEnd : 0;
+        segmentGuard.enabled = safeEnd != null && safeEnd > safeStart;
+        paragraphAudio.play().catch(() => {/* gesture required */});
       };
 
-      if (paragraphAudio.readyState >= 1) {
+      const seekAndPlay = () => {
+        const handleSeeked = () => {
+          paragraphAudio.removeEventListener('seeked', handleSeeked);
+          beginPlayback();
+        };
+        paragraphAudio.pause();
+        paragraphAudio.addEventListener('seeked', handleSeeked, { once: true });
+        try {
+          paragraphAudio.currentTime = paddedStart;
+        } catch (err) {
+          paragraphAudio.removeEventListener('seeked', handleSeeked);
+          beginPlayback();
+        }
+      };
+
+      if (paragraphAudio.readyState >= 2) {
         seekAndPlay();
       } else {
-        const onMeta = () => { paragraphAudio.removeEventListener('loadedmetadata', onMeta); seekAndPlay(); };
-        paragraphAudio.addEventListener('loadedmetadata', onMeta);
-        // In case src not yet loaded
+        const onCanPlay = () => {
+          paragraphAudio.removeEventListener('canplay', onCanPlay);
+          seekAndPlay();
+        };
+        paragraphAudio.addEventListener('canplay', onCanPlay, { once: true });
         try { paragraphAudio.load(); } catch (_) {}
       }
     }
@@ -95,7 +743,9 @@
         if (paragraphAudio.currentTime < entry.start || paragraphAudio.currentTime >= entry.end) {
           playSegment(entry.start, entry.end);
         } else {
-          segmentGuard.end = entry.end; segmentGuard.enabled = true;
+          segmentGuard.start = entry.start;
+          segmentGuard.end = entry.end;
+          segmentGuard.enabled = true;
           paragraphAudio.play().catch(()=>{});
         }
       } else {
@@ -113,7 +763,11 @@
       const target = Math.min(endMargin, Math.max(entry.start, unclamped));
       try { paragraphAudio.currentTime = target; } catch (_) {}
       // Keep guard to paragraph end if playing
-      if (!paragraphAudio.paused) { segmentGuard.end = entry.end; segmentGuard.enabled = true; }
+      if (!paragraphAudio.paused) {
+        segmentGuard.start = entry.start;
+        segmentGuard.end = entry.end;
+        segmentGuard.enabled = true;
+      }
     }
 
     function updateAllPlayIcons() {
@@ -126,6 +780,33 @@
         btn.setAttribute('aria-label', playing ? `Pause paragraph ${idx + 1}` : `Play paragraph ${idx + 1}`);
         btn.title = playing ? 'Pause' : 'Play';
       });
+    }
+
+    function startStatusWatcher(caseId, caseName) {
+      if (!caseId) return;
+      let lastStatus = null;
+
+      const poll = async () => {
+        try {
+          const status = await API.getCaseStatus(caseId);
+          if (!status || !status.status) return;
+          if (status.status !== lastStatus) {
+            lastStatus = status.status;
+            if (status.status === 'done') {
+              recordCaseReady(caseId, caseName);
+            } else if (status.status === 'failed') {
+              const name = caseName || `Case ${caseId}`;
+              showNotification(`Alignment failed for "${name}".`, 'error');
+            }
+          }
+        } catch (err) {
+          console.warn('Status watcher error:', err);
+        }
+      };
+
+      poll();
+      const interval = setInterval(poll, 4000);
+      window.addEventListener('beforeunload', () => clearInterval(interval));
     }
 
     // No dynamic tools visibility needed: nudges are revealed via CSS on hover
@@ -216,8 +897,30 @@
       try {
         showNotification("Loading transcript...", "success");
         const caseData = await API.fetchProtected(`cases/${caseId}`);
-        const transcriptRes = await API.fetchProtected(`/text/${caseData.text_file}`);
-        transcriptData = JSON.parse(transcriptRes.content);
+        currentCaseName = caseData.name || currentCaseName || '';
+        if (!startStatusWatcher._started) {
+          startStatusWatcher(caseId, currentCaseName);
+          startStatusWatcher._started = true;
+        }
+
+        const [transcriptRes, alignmentRes, rawTranscriptRes] = await Promise.all([
+          API.fetchProtected(`/text/${caseData.text_file}`),
+          API.getCaseAlignment(caseId).catch(() => null),
+          API.getCaseTranscript(caseId).catch(() => null),
+        ]);
+
+        try {
+          transcriptData = JSON.parse(transcriptRes.content);
+          if (!Array.isArray(transcriptData)) {
+            throw new Error('Transcript JSON is not an array');
+          }
+        } catch (parseErr) {
+          console.warn('Falling back to plain-text transcript parsing:', parseErr);
+          transcriptData = buildEntriesFromPlainText(transcriptRes.content || '');
+        }
+        const rawTranscriptText = typeof rawTranscriptRes?.text === 'string' ? rawTranscriptRes.text : null;
+        prepareAlignmentMetadata(transcriptData, alignmentRes, rawTranscriptText);
+
         configureAudioForCase(caseData);
         renderComments(transcriptData);
 
@@ -228,13 +931,26 @@
           if (entryBox) {
             setTimeout(() => {
               entryBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            }, 100); // W
+            }, 100);
           }
         }
       } catch (error) {
         console.error('Failed to load transcript or comments:', error);
         container.textContent = 'Failed to load transcript.';
       }
+    }
+
+    function buildEntriesFromPlainText(text) {
+      if (typeof text !== 'string' || !text.trim()) return [];
+      const blocks = text.split(/\n\s*\n+/).map((block) => block.trim()).filter(Boolean);
+      return blocks.map((block, idx) => ({
+        index: idx,
+        start: null,
+        end: null,
+        text: block,
+        word_count: block.split(/\s+/).filter(Boolean).length,
+        comments: [],
+      }));
     }
 
     // Utility: normalize text for case-insensitive compare
@@ -475,7 +1191,10 @@
       const section = document.getElementById('selectedCommentSection');
       const para = container.querySelector(`.entry-box[data-entry-index="${entryIndex}"]`);
       if (!para) return;
-      const target = para.querySelector(`.word[data-word-index="${wordIndex}"]`);
+      let target = para.querySelector(`.word[data-word-ordinal="${wordIndex}"]`);
+      if (!target) {
+        target = para.querySelector(`.word[data-word-index="${wordIndex}"]`);
+      }
       if (!target) return;
       const scrollerRect = scroller.getBoundingClientRect();
       const targetRect = target.getBoundingClientRect();
@@ -486,7 +1205,36 @@
 
     function renderComments(data) {
       container.innerHTML = '';
+      let lastPage = null;
+      const fallbackLinesByPage = new Map();
+
       data.forEach((entry, entryIndex) => {
+        const entryPage = Number.isFinite(Number(entry?.page)) ? Number(entry.page) : null;
+        const firstMeta = getWordLocationMeta(entryIndex, 0);
+        const metaPage = firstMeta && Number.isFinite(Number(firstMeta.page)) ? Number(firstMeta.page) : null;
+        let page = metaPage ?? entryPage;
+        if (lastPage != null && page != null && page < lastPage) {
+          page = lastPage;
+        }
+        if (page == null) {
+          page = lastPage != null ? lastPage : 1;
+        }
+
+        let pageKey = page != null ? page : '__fallback';
+        if (!fallbackLinesByPage.has(pageKey)) {
+          fallbackLinesByPage.set(pageKey, 0);
+        }
+
+        let currentPageForEntry = page;
+
+        if (page != null && page !== lastPage) {
+          const pageLabel = document.createElement('div');
+          pageLabel.className = 'page-label';
+          pageLabel.textContent = `Page ${page}`;
+          container.appendChild(pageLabel);
+          fallbackLinesByPage.set(page, 0);
+          lastPage = page;
+        }
         const entryDiv = document.createElement('div');
         entryDiv.className = 'entry-box';
         entryDiv.dataset.entryIndex = entryIndex;
@@ -494,34 +1242,143 @@
         const textEl = document.createElement('p');
         const tokens = entry.text.split(/(\s+)/);
         let wordOrdinal = -1;
+        let currentLineNumber = null;
+        let currentLineBlock = null;
+        let currentLineText = null;
+        let pendingManualBreak = false;
+
+        const startLineBlock = (lineCandidate) => {
+          let resolved;
+          if (Number.isFinite(lineCandidate)) {
+            resolved = lineCandidate;
+            fallbackLinesByPage.set(pageKey, lineCandidate);
+          } else {
+            const next = (fallbackLinesByPage.get(pageKey) || 0) + 1;
+            fallbackLinesByPage.set(pageKey, next);
+            resolved = next;
+          }
+          currentLineNumber = resolved;
+          currentLineBlock = document.createElement('div');
+          currentLineBlock.className = 'line-block';
+          const ln = document.createElement('span');
+          ln.className = 'line-no';
+          ln.textContent = resolved != null ? String(resolved) : '';
+          currentLineBlock.appendChild(ln);
+          currentLineText = document.createElement('span');
+          currentLineText.className = 'line-text';
+          currentLineBlock.appendChild(currentLineText);
+          textEl.appendChild(currentLineBlock);
+          pendingManualBreak = false;
+        };
+
+        const ensureLineBlock = (lineCandidate) => {
+          const hasCandidate = Number.isFinite(lineCandidate);
+          if (!currentLineBlock) {
+            startLineBlock(hasCandidate ? lineCandidate : null);
+            return;
+          }
+          if (hasCandidate && lineCandidate !== currentLineNumber) {
+            startLineBlock(lineCandidate);
+            return;
+          }
+          if (!hasCandidate && pendingManualBreak) {
+            startLineBlock(null);
+          }
+        };
+
+        const breakLine = () => {
+          currentLineBlock = null;
+          currentLineText = null;
+          currentLineNumber = null;
+          pendingManualBreak = true;
+        };
+
         tokens.forEach((token, tokenIndex) => {
+          const isWord = token.trim().length > 0;
+          if (!isWord) {
+            const parts = token.split(/(\n)/);
+            parts.forEach((part) => {
+              if (part === '\n') {
+                breakLine();
+                return;
+              }
+              if (!part) return;
+              const wsSpan = document.createElement('span');
+              wsSpan.textContent = part;
+              wsSpan.dataset.entryIndex = entryIndex;
+              if (currentLineText) {
+                currentLineText.appendChild(wsSpan);
+              } else {
+                textEl.appendChild(wsSpan);
+              }
+            });
+            return;
+          }
+
           const span = document.createElement('span');
           span.textContent = token;
           span.dataset.entryIndex = entryIndex;
-          const isWord = token.trim().length > 0;
-          if (isWord) {
-            wordOrdinal += 1;
-            span.classList.add('word');
-            // Preserve original semantics: data-word-index holds token index
-            span.dataset.wordIndex = String(tokenIndex);
-            span.dataset.wordOrdinal = String(wordOrdinal);
 
-            span.addEventListener('click', (e) => {
-              e.stopPropagation();
-              // Pass token index for selection to preserve saved format
-              handleWordClick(entryIndex, tokenIndex);
-            });
-
-            span.addEventListener('mouseenter', () => {
-              if (span.classList.contains('commented')) { span.style.backgroundColor = '#cce5ff'; }
-            });
-            
-            span.addEventListener('mouseleave', () => {
-              if (span.classList.contains('commented')) { span.style.backgroundColor = ''; }
-            });
+          const nextOrd = wordOrdinal + 1;
+          const meta = getWordLocationMeta(entryIndex, nextOrd);
+          const metaPage = meta && Number.isFinite(Number(meta.page)) ? Number(meta.page) : null;
+          let lineNo = meta && Number.isFinite(Number(meta.line)) ? Number(meta.line) : null;
+          const fallbackPageForWord = currentPageForEntry != null ? currentPageForEntry : page;
+          let effectivePage;
+          if (metaPage != null) {
+            if (currentPageForEntry != null && metaPage < currentPageForEntry) {
+              effectivePage = currentPageForEntry;
+            } else {
+              effectivePage = metaPage;
+            }
+          } else {
+            effectivePage = fallbackPageForWord;
+          }
+          if (effectivePage != null && effectivePage !== currentPageForEntry) {
+            currentPageForEntry = effectivePage;
+            pageKey = effectivePage != null ? effectivePage : '__fallback';
+            fallbackLinesByPage.set(pageKey, 0);
+            const inlineLabel = document.createElement('div');
+            inlineLabel.className = 'page-label page-label--inline';
+            inlineLabel.textContent = `Page ${effectivePage}`;
+            textEl.appendChild(inlineLabel);
+            breakLine();
+            lastPage = effectivePage;
+            lineNo = null; // restart numbering for new page segment
+          }
+          if (!Number.isFinite(lineNo) || lineNo <= 0) {
+            const next = (fallbackLinesByPage.get(pageKey) || 0) + 1;
+            fallbackLinesByPage.set(pageKey, next);
+            lineNo = next;
+          }
+          ensureLineBlock(lineNo);
+          if (!currentLineBlock) {
+            startLineBlock(lineNo);
           }
 
-          textEl.appendChild(span);
+          wordOrdinal = nextOrd;
+          span.classList.add('word');
+          span.dataset.wordIndex = String(tokenIndex);
+          span.dataset.wordOrdinal = String(wordOrdinal);
+
+          span.addEventListener('click', (e) => {
+            e.stopPropagation();
+            handleWordClick(entryIndex, tokenIndex);
+          });
+
+          span.addEventListener('mouseenter', () => {
+            if (span.classList.contains('commented')) { span.style.backgroundColor = '#cce5ff'; }
+          });
+
+          span.addEventListener('mouseleave', () => {
+            if (span.classList.contains('commented')) { span.style.backgroundColor = ''; }
+          });
+
+          if (currentLineText) {
+            currentLineText.appendChild(span);
+          } else {
+            textEl.appendChild(span);
+          }
         });
 
         // After building all words for this paragraph, underline each comment's exact length range
@@ -578,7 +1435,8 @@
               }, 100);
             });
 
-            textEl.insertBefore(icon, startSpan);
+            // Insert the icon adjacent to the first word, within its line block
+            startSpan.parentNode.insertBefore(icon, startSpan);
           }
         });
 
@@ -827,18 +1685,71 @@
           if (activeComment && activeComment.entryIndex === entryIndex && activeComment.commentIndex === i) {
             div.classList.add('active');
           }
+          const startWordRaw = Number.parseInt(comment.start_word, 10);
+          const endWordRaw = Number.parseInt(comment.end_word, 10);
+          const safeStart = Number.isFinite(startWordRaw) ? startWordRaw : 0;
+          const safeEnd = Number.isFinite(endWordRaw) ? endWordRaw : safeStart;
+          const wordStart = Math.min(safeStart, safeEnd);
+          const wordEnd = Math.max(safeStart, safeEnd);
+
           div.dataset.entryIndex = entryIndex;
           div.dataset.commentIndex = i;
-          div.dataset.startWord = comment.start_word;
+          div.dataset.startWord = wordStart;
 
-          const p = document.createElement('p');
-          const paragraphLabel = `Paragraph ${entryIndex + 1}, words ${comment.start_word + 1}-${comment.end_word + 1}`;
-          p.innerHTML = `
-            <strong>${paragraphLabel}</strong><br>
-            ${comment.internal_comment ? `<em>Internal:</em> ${comment.internal_comment}<br>` : ''}
-            ${comment.external_comment ? `<em>External:</em> ${comment.external_comment}` : ''}
-          `;
-          div.appendChild(p);
+          const body = document.createElement('div');
+          body.className = 'comment-body';
+
+          if (comment.internal_comment) {
+            const internalP = document.createElement('p');
+            const internalLabel = document.createElement('span');
+            internalLabel.className = 'comment-label';
+            internalLabel.textContent = 'Internal:';
+            internalP.appendChild(internalLabel);
+            internalP.appendChild(document.createTextNode(` ${comment.internal_comment}`));
+            body.appendChild(internalP);
+          }
+
+          if (comment.external_comment) {
+            const externalP = document.createElement('p');
+            const externalLabel = document.createElement('span');
+            externalLabel.className = 'comment-label';
+            externalLabel.textContent = 'External:';
+            externalP.appendChild(externalLabel);
+            externalP.appendChild(document.createTextNode(` ${comment.external_comment}`));
+            body.appendChild(externalP);
+          }
+
+          if (!comment.internal_comment && !comment.external_comment) {
+            const emptyP = document.createElement('p');
+            emptyP.textContent = '(No comment text)';
+            body.appendChild(emptyP);
+          }
+
+          const locationText = formatLocationSummary(entryIndex, wordStart, wordEnd, entry);
+
+          const { start: rangeStart, end: rangeEnd } = getWordRangeTimes(entryIndex, wordStart, wordEnd);
+          const timeText = formatTimeRange(rangeStart, rangeEnd);
+
+          const meta = document.createElement('div');
+          meta.className = 'comment-meta';
+
+          const locationLine = document.createElement('div');
+          locationLine.className = 'comment-meta__location';
+          locationLine.textContent = locationText;
+          meta.appendChild(locationLine);
+
+          const timeLine = document.createElement('div');
+          timeLine.className = 'comment-meta__time';
+          if (timeText) {
+            timeLine.textContent = timeText;
+          } else {
+            timeLine.textContent = 'Timestamp unavailable';
+            timeLine.classList.add('is-muted');
+          }
+          meta.appendChild(timeLine);
+
+          div.appendChild(body);
+          div.appendChild(meta);
 
           // Kebab icon and contextual menu
           const kebab = document.createElement('div');
@@ -878,7 +1789,7 @@
           div.addEventListener('click', () => {
             activeComment = { entryIndex, commentIndex: i };
             updateCommentPanel();
-            highlightWordRange(entryIndex, comment.start_word, comment.end_word);
+            highlightWordRange(entryIndex, wordStart, wordEnd);
             const para = container.querySelector(`.entry-box[data-entry-index="${entryIndex}"]`);
             if (para) {
               para.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -1227,21 +2138,50 @@
     if (downloadExternalBtn) {
       downloadExternalBtn.addEventListener('click', async (e) => {
         e.preventDefault();
-        // Close menu
         if (headerMenu) headerMenu.classList.remove('open');
         if (headerMenuBtn) headerMenuBtn.setAttribute('aria-expanded', 'false');
 
+        const textContent = collectExternalCommentsText();
+        if (!textContent) {
+          showNotification('No external comments to export.', 'error');
+          return;
+        }
+
+        const defaultBase = `case-${caseId}-external-comments`;
+        let suggestedName = `${defaultBase}.docx`;
+        let docxBlob = null;
+
         try {
-          const content = collectExternalCommentsText();
-          if (!content) {
+          const response = await API.downloadExternalComments(caseId, 'docx');
+          const disposition = response.headers.get('Content-Disposition');
+          const filename = parseFilenameFromDisposition(disposition);
+          if (filename) {
+            suggestedName = filename;
+          }
+          docxBlob = await response.blob();
+        } catch (err) {
+          if (err && err.status === 400 && String(err.message || '').toLowerCase().includes('no external comments')) {
             showNotification('No external comments to export.', 'error');
             return;
           }
-          const defaultName = `case-${caseId}-external-comments.txt`;
-          const saved = await saveTextWithPicker(defaultName, content);
-          if (!saved) {
-            fallbackDownload(defaultName, content);
-            showNotification('External comments downloaded.', 'success');
+          console.warn('DOCX export unavailable, falling back to TXT:', err);
+          docxBlob = null;
+        }
+
+        try {
+          if (docxBlob) {
+            const saved = await saveExportWithPicker(suggestedName, docxBlob, textContent);
+            if (!saved) {
+              fallbackDownloadBlob(suggestedName, docxBlob);
+              showNotification('External comments downloaded.', 'success');
+            }
+          } else {
+            const textName = /\.docx$/i.test(suggestedName) ? suggestedName.replace(/\.docx$/i, '.txt') : `${defaultBase}.txt`;
+            const savedText = await saveTextWithPicker(textName, textContent);
+            if (!savedText) {
+              fallbackDownload(textName, textContent);
+              showNotification('External comments downloaded.', 'success');
+            }
           }
         } catch (err) {
           console.error('Failed to export external comments:', err);
@@ -1272,11 +2212,13 @@
           const e = Math.max(s, Number(c.end_word) || s);
           const selected = words.slice(s, e + 1);
           const selectedText = selected.join(' ');
+          const safeSelected = selectedText.replace(/"/g, "'");
+          const safeExternal = ext.replace(/"/g, "'");
           const length = Math.max(0, e - s + 1);
           counter += 1;
           lines.push(`[${counter}] Paragraph ${entryIndex + 1}, words ${s + 1}-${e + 1} (length: ${length})`);
-          lines.push(`Text: "${selectedText}"`);
-          lines.push(`External comment: "${ext}"`);
+          lines.push(`Text: '${safeSelected}'`);
+          lines.push(`External comment: '${safeExternal}'`);
           lines.push('');
         });
       });
@@ -1312,8 +2254,57 @@
       return false;
     }
 
-    function fallbackDownload(filename, text) {
-      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    function parseFilenameFromDisposition(disposition) {
+      if (!disposition) return null;
+      const utfMatch = /filename\*\=UTF-8''([^;]+)/i.exec(disposition);
+      if (utfMatch && utfMatch[1]) {
+        try {
+          return decodeURIComponent(utfMatch[1]);
+        } catch (_) {
+          return utfMatch[1];
+        }
+      }
+      const match = /filename=\"?([^\";]+)\"?/i.exec(disposition);
+      if (match && match[1]) {
+        return match[1];
+      }
+      return null;
+    }
+
+    async function saveExportWithPicker(suggestedName, docxBlob, textContent) {
+      const w = /** @type {any} */ (window);
+      if (w && typeof w.showSaveFilePicker === 'function') {
+        try {
+          const handle = await w.showSaveFilePicker({
+            suggestedName,
+            types: [
+              { description: 'Word Document', accept: { 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'] } },
+              { description: 'Text File', accept: { 'text/plain': ['.txt'] } },
+            ],
+          });
+          const writable = await handle.createWritable();
+          const targetName = (handle.name || suggestedName || '').toLowerCase();
+          if ((targetName.endsWith('.txt') || !docxBlob) && typeof textContent === 'string') {
+            await writable.write(textContent);
+          } else if (docxBlob) {
+            const buffer = await docxBlob.arrayBuffer();
+            await writable.write(buffer);
+          } else if (typeof textContent === 'string') {
+            await writable.write(textContent);
+          }
+          await writable.close();
+          showNotification('External comments saved.', 'success');
+          return true;
+        } catch (err) {
+          if (err && (err.name === 'AbortError' || err.code === 20)) return false;
+          console.warn('showSaveFilePicker failed, falling back to download:', err);
+          return false;
+        }
+      }
+      return false;
+    }
+
+    function fallbackDownloadBlob(filename, blob) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -1322,4 +2313,9 @@
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
+    }
+
+    function fallbackDownload(filename, text) {
+      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+      fallbackDownloadBlob(filename, blob);
     }
