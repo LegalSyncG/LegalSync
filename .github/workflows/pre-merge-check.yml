@@ -1,0 +1,155 @@
+name: Pre-Merge Conflict Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+
+jobs:
+  check-merge-conflicts:
+    name: Check for Merge Conflicts
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      
+      - name: Fetch main branch
+        run: |
+          git fetch origin main:main
+      
+      - name: Check for merge conflicts
+        id: conflict_check
+        run: |
+          echo "Checking for merge conflicts with main branch..."
+          
+          # Try to merge main into the current branch (dry run)
+          if git merge-tree $(git merge-base HEAD main) main HEAD | grep -q '<<<<<'; then
+            echo "❌ MERGE CONFLICTS DETECTED!"
+            echo "conflicts=true" >> $GITHUB_OUTPUT
+            echo ""
+            echo "Conflicting files:"
+            git merge-tree $(git merge-base HEAD main) main HEAD | grep -B 5 '<<<<<' | grep 'changed in both' || true
+            exit 1
+          else
+            echo "✅ No merge conflicts detected"
+            echo "conflicts=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Comment on PR (if conflicts)
+        if: failure() && steps.conflict_check.outputs.conflicts == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '❌ **Merge Conflict Detected**\n\nThis branch has conflicts with `main`. Please resolve the conflicts before merging.'
+            })
+
+  check-code-compatibility:
+    name: Check Code Compatibility
+    runs-on: ubuntu-latest
+    needs: check-merge-conflicts
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          pip install flake8 pylint
+      
+      - name: Check Python syntax
+        run: |
+          echo "Checking Python syntax..."
+          python -m py_compile backend/**/*.py
+      
+      - name: Run linting checks
+        continue-on-error: true
+        run: |
+          echo "Running flake8 linting..."
+          cd backend
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=__pycache__,.git,venv,env
+      
+      - name: Check for conflicting functionality
+        run: |
+          echo "Checking for conflicting imports or duplicate definitions..."
+          cd backend
+          
+          # Check for duplicate function/class definitions
+          python3 << 'EOF'
+          import os
+          import ast
+          import sys
+          from collections import defaultdict
+          
+          def check_duplicates(directory):
+              definitions = defaultdict(list)
+              
+              for root, dirs, files in os.walk(directory):
+                  # Skip common directories
+                  dirs[:] = [d for d in dirs if d not in ['__pycache__', '.git', 'venv', 'env']]
+                  
+                  for file in files:
+                      if file.endswith('.py'):
+                          filepath = os.path.join(root, file)
+                          try:
+                              with open(filepath, 'r', encoding='utf-8') as f:
+                                  tree = ast.parse(f.read(), filename=filepath)
+                              
+                              for node in ast.walk(tree):
+                                  if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                                      key = f"{node.name}"
+                                      definitions[key].append(filepath)
+                          except Exception as e:
+                              print(f"Warning: Could not parse {filepath}: {e}")
+              
+              # Check for suspicious duplicates
+              suspicious = False
+              for name, files in definitions.items():
+                  if len(files) > 1:
+                      # Filter out common patterns like __init__
+                      if name not in ['__init__', '__str__', '__repr__']:
+                          unique_files = set(files)
+                          if len(unique_files) > 1:
+                              print(f"⚠️  Multiple definitions of '{name}' found in:")
+                              for f in unique_files:
+                                  print(f"   - {f}")
+                              suspicious = True
+              
+              if not suspicious:
+                  print("✅ No conflicting definitions detected")
+              
+              return 0  # Don't fail the build for warnings
+          
+          exit(check_duplicates('.'))
+          EOF
+
+  merge-readiness-summary:
+    name: Merge Readiness Summary
+    runs-on: ubuntu-latest
+    needs: [check-merge-conflicts, check-code-compatibility]
+    if: always()
+    
+    steps:
+      - name: Summary
+        run: |
+          echo "### Merge Readiness Check Complete ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All pre-merge checks have been completed." >> $GITHUB_STEP_SUMMARY
+          echo "Review the results above before merging." >> $GITHUB_STEP_SUMMARY
