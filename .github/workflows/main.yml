@@ -28,6 +28,7 @@ jobs:
           ssh -o StrictHostKeyChecking=no -i key.pem ${EC2_USER}@${EC2_HOST} << 'EOF'
             cd /home/${EC2_USER}
             echo "Running app..."
+            cd $HOME
             ./run_app.sh
           EOF
 
