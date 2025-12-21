@@ -3,7 +3,7 @@ from flask import request, jsonify, Blueprint
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from pathlib import Path
 
-from database.models import Cases, Files
+from backend.database.models import Cases, Files
 
 TRANSCRIPTS_DIR = Path('data/transcripts')  # adjust as needed
 

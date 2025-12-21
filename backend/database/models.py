@@ -1,7 +1,7 @@
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 from sqlalchemy.dialects.postgresql import ENUM
-from database.session import db
+from backend.database.session import db
 
 class User(db.Model):
     __tablename__ = 'users'
