@@ -63,8 +63,8 @@ jobs:
           IMAGE_TAG=${GITHUB_SHA::7}
           docker build -t $IMAGE_URI:$IMAGE_TAG .
           docker push $IMAGE_URI:$IMAGE_TAG
-          echo "ECR_IMAGE=$IMAGE_URI" >> $GITHUB_ENV
-          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+          echo "::set-output name=ECR_IMAGE::$IMAGE_URI"
+          echo "::set-output name=IMAGE_TAG::$IMAGE_TAG"
 
   deploy:
     name: Deploy via SSM
@@ -80,8 +80,8 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
-          ECR_IMAGE: ${{ env.ECR_IMAGE }}
-          IMAGE_TAG: ${{ env.IMAGE_TAG }}
+          ECR_IMAGE: ${{ needs.build-and-push.outputs.ECR_IMAGE }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.IMAGE_TAG }}
         run: |
           echo "Deploying image $ECR_IMAGE:$IMAGE_TAG via SSM..."
 
