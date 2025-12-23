@@ -91,10 +91,10 @@ jobs:
             --document-name "AWS-RunShellScript" \
             --comment "Deploy LegalSync" \
             --parameters 'commands=[
-              "cd /home/ec2-user",
+              "cd /home/ec2-user/legalsync",
               "docker pull '"$ECR_IMAGE:$IMAGE_TAG"'",
               "docker tag '"$ECR_IMAGE:$IMAGE_TAG"' legalsync:current || true",
-              "docker-compose -f docker-compose.yml up -d"
+              "docker compose up -d"
             ]' \
             --region $AWS_REGION \
             --query "Command.CommandId" \
@@ -139,8 +139,8 @@ jobs:
                 --targets "Key=instanceIds,Values=$INSTANCE_ID" \
                 --document-name "AWS-RunShellScript" \
                 --parameters 'commands=[
-                  "cd /home/ec2-user",
-                  "docker-compose -f docker-compose.yml up -d --no-build legalsync:current"
+                  "cd /home/ec2-user/legalsync",
+                  "docker compose up -d --no-build legalsync:current"
                 ]'
               exit 1
             fi
