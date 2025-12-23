@@ -1,4 +1,4 @@
-name: Deploy to EC2
+name: CI/CD Deploy to EC2
 
 on:
   push:
@@ -17,9 +17,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            ffmpeg \
-            libgomp1
+          sudo apt-get install -y ffmpeg libgomp1
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -27,51 +25,77 @@ jobs:
           python-version: "3.10"
 
       - name: Upgrade pip
-        run: |
-          python -m pip install --upgrade pip setuptools wheel
+        run: python -m pip install --upgrade pip setuptools wheel
 
       - name: Install Python dependencies
-        run: |
-          pip install -r backend/requirements.txt
+        run: pip install -r backend/requirements.txt
 
       - name: Run pytest
         run: |
           cd tests
           pytest -v
 
-  deploy:
-    name: Deploy to EC2 via SSM
+  build-and-push:
+    name: Build & Push Docker Image
     runs-on: ubuntu-latest
     needs: test
-  
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        
-      - name: Check AWS CLI
-        run: aws --version
 
-      - name: Deploy via SSM with status check
+      - name: Login to AWS ECR
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build & push image
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+        run: |
+          IMAGE_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/legalsync
+          IMAGE_TAG=${GITHUB_SHA::7}
+          docker build -t $IMAGE_URI:$IMAGE_TAG .
+          docker push $IMAGE_URI:$IMAGE_TAG
+          echo "ECR_IMAGE=$IMAGE_URI" >> $GITHUB_ENV
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+
+  deploy:
+    name: Deploy via SSM
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSM with rollback
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
+          ECR_IMAGE: ${{ env.ECR_IMAGE }}
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
         run: |
-          echo "Sending deploy command via SSM..."
+          echo "Deploying image $ECR_IMAGE:$IMAGE_TAG via SSM..."
+
+          # Send deploy command
           COMMAND_ID=$(aws ssm send-command \
             --targets "Key=tag:Name,Values=LegalSyncApp" \
             --document-name "AWS-RunShellScript" \
             --comment "Deploy LegalSync" \
             --parameters 'commands=[
               "cd /home/ec2-user",
-              "./run_app.sh"
+              "docker pull '"$ECR_IMAGE:$IMAGE_TAG"'",
+              "docker tag '"$ECR_IMAGE:$IMAGE_TAG"' legalsync:current || true",
+              "docker-compose -f docker-compose.yml up -d"
             ]' \
             --region $AWS_REGION \
             --query "Command.CommandId" \
             --output text)
-          
+
           echo "Command ID: $COMMAND_ID"
 
+          # Poll instance until command finishes
           for INSTANCE_ID in $(aws ec2 describe-instances \
               --filters "Name=tag:Name,Values=LegalSyncApp" \
               --query "Reservations[].Instances[].InstanceId" \
@@ -79,7 +103,7 @@ jobs:
 
             STATUS="Pending"
             while [[ "$STATUS" == "Pending" || "$STATUS" == "InProgress" ]]; do
-              sleep 2
+              sleep 5
               STATUS=$(aws ssm get-command-invocation \
                 --command-id $COMMAND_ID \
                 --instance-id $INSTANCE_ID \
@@ -88,15 +112,29 @@ jobs:
               echo "Instance $INSTANCE_ID: $STATUS"
             done
 
-            echo "Output for $INSTANCE_ID:"
+            # Fetch logs
             aws ssm get-command-invocation \
               --command-id $COMMAND_ID \
               --instance-id $INSTANCE_ID \
               --query "[StandardOutputContent,StandardErrorContent]" \
               --output text
 
-            if [[ "$STATUS" != "Success" ]]; then
-              echo "Deployment failed on instance $INSTANCE_ID"
+            # Rollback if container unhealthy
+            HEALTH=$(aws ssm send-command \
+              --targets "Key=instanceIds,Values=$INSTANCE_ID" \
+              --document-name "AWS-RunShellScript" \
+              --parameters 'commands=["docker inspect --format '\''{{.State.Health.Status}}'\'' legalsync"]' \
+              --query "Command.CommandId" \
+              --output text)
+            if [[ "$HEALTH" != "healthy" ]]; then
+              echo "Health check failed on $INSTANCE_ID, rolling back..."
+              aws ssm send-command \
+                --targets "Key=instanceIds,Values=$INSTANCE_ID" \
+                --document-name "AWS-RunShellScript" \
+                --parameters 'commands=[
+                  "cd /home/ec2-user",
+                  "docker-compose -f docker-compose.yml up -d --no-build legalsync:current"
+                ]'
               exit 1
             fi
           done
