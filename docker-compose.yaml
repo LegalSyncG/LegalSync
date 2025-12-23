@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   legalsync:
-    build: .
+    image: "${ECR_IMAGE}:${IMAGE_TAG}" 
     container_name: legalsync
     ports:
       - "8080:8080"
@@ -21,3 +21,8 @@ services:
       - ./frontend/public:/app/backend/static
       - ./uploads:/app/backend/uploads
     command: gunicorn -w 2 --reload -b 0.0.0.0:8080 backend.wsgi:app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      retries: 3
+      start_period: 5s
