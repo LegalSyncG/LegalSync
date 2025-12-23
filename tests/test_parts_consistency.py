@@ -5,15 +5,6 @@ import pytest
 import json
 from pathlib import Path
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-# Only import alignment service if needed
-try:
-    from services import alignment
-except ImportError:
-    pass
-
-
 
 def test_mapped_parts_len_matches_parts_times_when_present():
     root = Path('uploads/personal')
