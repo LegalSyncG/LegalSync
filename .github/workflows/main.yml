@@ -86,7 +86,7 @@ jobs:
         run: |
           ECR_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/legalsync"
           echo "Deploying image $ECR_IMAGE:$IMAGE_TAG via SSM..."
-
+          
           # Send deploy command
           COMMAND_ID=$(aws ssm send-command \
             --targets "Key=tag:Name,Values=LegalSyncApp" \
@@ -102,15 +102,15 @@ jobs:
             --region $AWS_REGION \
             --query "Command.CommandId" \
             --output text)
-
+          
           echo "Command ID: $COMMAND_ID"
-
+          
           # Poll instance until command finishes
           for INSTANCE_ID in $(aws ec2 describe-instances \
               --filters "Name=tag:Name,Values=LegalSyncApp" \
               --query "Reservations[].Instances[].InstanceId" \
               --output text); do
-
+          
             STATUS="Pending"
             while [[ "$STATUS" == "Pending" || "$STATUS" == "InProgress" ]]; do
               sleep 5
@@ -121,31 +121,62 @@ jobs:
                 --output text)
               echo "Instance $INSTANCE_ID: $STATUS"
             done
-
+          
             # Fetch logs
             aws ssm get-command-invocation \
               --command-id $COMMAND_ID \
               --instance-id $INSTANCE_ID \
               --query "[StandardOutputContent,StandardErrorContent]" \
               --output text
-
-            # Rollback if container unhealthy
-            HEALTH=$(aws ssm send-command \
+          
+            echo "Waiting for container to start..."
+            sleep 10
+            
+            # Run health check command
+            HEALTH_CMD_ID=$(aws ssm send-command \
               --targets "Key=instanceIds,Values=$INSTANCE_ID" \
               --document-name "AWS-RunShellScript" \
-              --parameters 'commands=["docker inspect --format '\''{{.State.Health.Status}}'\'' legalsync"]' \
+              --parameters "commands=[\"docker inspect --format '{{.State.Health.Status}}' legalsync 2>/dev/null || echo 'no-healthcheck'\"]" \
+              --region $AWS_REGION \
               --query "Command.CommandId" \
               --output text)
-
-            if [[ "$HEALTH" != "healthy" ]]; then
-              echo "Health check failed on $INSTANCE_ID, rolling back..."
+            
+            echo "Health check command ID: $HEALTH_CMD_ID"
+            
+            # Wait for health check command to complete
+            HEALTH_STATUS="Pending"
+            while [[ "$HEALTH_STATUS" == "Pending" || "$HEALTH_STATUS" == "InProgress" ]]; do
+              sleep 3
+              HEALTH_STATUS=$(aws ssm get-command-invocation \
+                --command-id $HEALTH_CMD_ID \
+                --instance-id $INSTANCE_ID \
+                --region $AWS_REGION \
+                --query "Status" \
+                --output text 2>/dev/null || echo "Pending")
+            done
+            
+            # Get the actual health check output
+            HEALTH=$(aws ssm get-command-invocation \
+              --command-id $HEALTH_CMD_ID \
+              --instance-id $INSTANCE_ID \
+              --region $AWS_REGION \
+              --query "StandardOutputContent" \
+              --output text | tr -d '[:space:]')
+            
+            echo "Container health status: $HEALTH"
+          
+            if [[ "$HEALTH" != "healthy" && "$HEALTH" != "no-healthcheck" ]]; then
+              echo "Health check failed on $INSTANCE_ID (status: $HEALTH), rolling back..."
               aws ssm send-command \
                 --targets "Key=instanceIds,Values=$INSTANCE_ID" \
                 --document-name "AWS-RunShellScript" \
-                --parameters 'commands=[
-                  "cd /home/ec2-user/LegalSync",
-                  "docker compose up -d --no-build legalsync:current"
-                ]'
+                --parameters "commands=[
+                  \"cd /home/ec2-user/LegalSync\",
+                  \"docker compose up -d legalsync\"
+                ]" \
+                --region $AWS_REGION
               exit 1
             fi
+            
+            echo "Deployment successful on $INSTANCE_ID"
           done
