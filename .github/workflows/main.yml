@@ -92,13 +92,13 @@ jobs:
             --targets "Key=tag:Name,Values=LegalSyncApp" \
             --document-name "AWS-RunShellScript" \
             --comment "Deploy LegalSync" \
-            --parameters 'commands=[
-              "cd /home/ec2-user/LegalSync",
-              "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com",
-              "docker pull '"$ECR_IMAGE:$IMAGE_TAG"'",
-              "docker tag '"$ECR_IMAGE:$IMAGE_TAG"' legalsync:current || true",
-              "docker compose up -d"
-            ]' \
+            --parameters "commands=[
+              \"cd /home/ec2-user/LegalSync\",
+              \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com\",
+              \"docker pull $ECR_IMAGE:$IMAGE_TAG\",
+              \"docker tag $ECR_IMAGE:$IMAGE_TAG legalsync:current || true\",
+              \"docker compose up -d\"
+            ]" \
             --region $AWS_REGION \
             --query "Command.CommandId" \
             --output text)
