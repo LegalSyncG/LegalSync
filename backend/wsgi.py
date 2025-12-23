@@ -1,5 +1,5 @@
-from main import create_app
-from database.session import db
+from backend.main import create_app
+from backend.database.session import db
 
 app = create_app()
 

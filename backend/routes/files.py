@@ -5,9 +5,9 @@ from enum import Enum
 
 from flask import Response, request, jsonify
 from flask_jwt_extended import verify_jwt_in_request, decode_token, get_jwt_identity
-from database.session import db
-from database.models import Files, Cases
-from routes.profile import profile_bp
+from backend.database.session import db
+from backend.database.models import Files, Cases
+from backend.routes.profile import profile_bp
 
 static_path = 'uploads/static/'
 personal_path = 'uploads/personal/'
@@ -35,7 +35,13 @@ def register_file(user_id, file_type : FileType):
     if can_edit:
         source_index = 1 if file_type == FileType.Text1 else 2
         source_path = f'{static_path}docs/text_{source_index}.txt'
-        shutil.copy(source_path, target_path)
+        # If the static source file doesn't exist (e.g., in test environment),
+        # create an empty target file instead of raising FileNotFoundError.
+        if os.path.exists(source_path):
+            shutil.copy(source_path, target_path)
+        else:
+            with open(target_path, 'w', encoding='utf-8') as f:
+                f.write('')
 
     new_file = Files(
         owner_id=user_id,

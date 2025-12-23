@@ -1,7 +1,7 @@
 import json
 import os
 from flask import Blueprint, Response, request
-from database.models import Files, Cases
+from backend.database.models import Files, Cases
 
 profile_bp = Blueprint('profile', __name__)
 

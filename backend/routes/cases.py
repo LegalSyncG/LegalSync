@@ -11,9 +11,9 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from docx import Document
 from docx.oxml.ns import qn
 
-from database.session import db
-from database.models import Files, Cases
-from services.alignment import (
+from backend.database.session import db
+from backend.database.models import Files, Cases
+from backend.services.alignment import (
     build_paragraph_entries_from_alignment,
     write_json,
     _run_ffmpeg_to_wav,
@@ -22,8 +22,8 @@ from services.alignment import (
     build_mapped_parts,
     _tokenize_words,
 )
-from services.whisper_asr import transcribe_with_whisper
-from services.pdf_extract import extract_pdf_text_and_metadata
+from backend.services.whisper_asr import transcribe_with_whisper
+from backend.services.pdf_extract import extract_pdf_text_and_metadata
 from xml.etree import ElementTree
 
 
