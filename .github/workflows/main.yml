@@ -38,7 +38,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     outputs:                        
-      ECR_IMAGE: ${{ steps.set-vars.outputs.ECR_IMAGE }}
       IMAGE_TAG: ${{ steps.set-vars.outputs.IMAGE_TAG }}
     steps:
       - name: Checkout repository
@@ -66,7 +65,6 @@ jobs:
           echo "Building Docker image $IMAGE_URI:$IMAGE_TAG"
           docker build -t $IMAGE_URI:$IMAGE_TAG .
           docker push $IMAGE_URI:$IMAGE_TAG
-          echo "ECR_IMAGE=$IMAGE_URI" >> $GITHUB_OUTPUT
           echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
 
   deploy:
@@ -83,9 +81,10 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
-          ECR_IMAGE: ${{ needs.build-and-push.outputs.ECR_IMAGE }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
           IMAGE_TAG: ${{ needs.build-and-push.outputs.IMAGE_TAG }}
         run: |
+          ECR_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/legalsync"
           echo "Deploying image $ECR_IMAGE:$IMAGE_TAG via SSM..."
 
           # Send deploy command
