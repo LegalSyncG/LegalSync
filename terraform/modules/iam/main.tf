@@ -37,6 +37,11 @@ resource "aws_iam_role_policy_attachment" "rds" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonRDSDataFullAccess"
 }
 
+resource "aws_iam_role_policy_attachment" "secretsmanager" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = "arn:aws:iam::aws:policy/SecretsManagerReadWrite"
+}
+
 resource "aws_iam_instance_profile" "ec2_profile" {
   name = "${var.name}-profile"
   role = aws_iam_role.ec2_role.name

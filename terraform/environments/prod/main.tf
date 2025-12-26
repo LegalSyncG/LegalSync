@@ -63,5 +63,16 @@ module "rds" {
   subnet_ids      = module.vpc.private_subnet_ids
   security_groups = [module.security_groups.rds_sg_id]
   instance_class  = var.db_instance_class
+  db_username     = var.db_username
+  db_password     = var.db_password
   tags            = local.tags
+}
+
+module "postgres_secret" {
+  source = "../../modules/secrets-manager"
+
+  name        = "prod/legalsync/postgres"
+  description = "Access for PostgreSQL DB for prod env for LegalSync App"
+
+  tags = local.tags
 }

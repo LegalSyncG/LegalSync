@@ -7,8 +7,15 @@ class Config:
     JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY") or "dev-only-jwt-secret-change-me"
 
     # Database
-    SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL", "sqlite:///legalsync.db")
-    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    DATABASE_URL = os.getenv("DATABASE_URL")
+
+    if DATABASE_URL:
+        SQLALCHEMY_DATABASE_URI = DATABASE_URL.replace(
+            "postgres://", "postgresql+psycopg2://", 1
+        )
+    else:
+        # Fallback for local dev
+        SQLALCHEMY_DATABASE_URI = "sqlite:///legalsync.db"
 
     # Uploads
     UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "./uploads")
