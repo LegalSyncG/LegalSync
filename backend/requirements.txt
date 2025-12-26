@@ -8,3 +8,4 @@ faster-whisper
 python-docx
 pdfminer.six==20231228
 pytest
+psycopg2-binary
