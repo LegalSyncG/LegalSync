@@ -16,6 +16,7 @@ services:
       ANCHOR_WINDOW: 4
       ANCHOR_N_MAX: 5
       ANCHOR_N_MIN: 2
+      DATABASE_URL: ${DATABASE_URL}
     volumes:
       - .:/app
       - ./frontend/public:/app/backend/static
