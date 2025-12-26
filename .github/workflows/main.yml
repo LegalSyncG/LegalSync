@@ -71,12 +71,11 @@ jobs:
     name: Deploy via SSM
     runs-on: ubuntu-latest
     needs: build-and-push
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Deploy via SSM with Docker and RDS secret
+      - name: Deploy via SSM
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -87,18 +86,16 @@ jobs:
           ECR_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/legalsync"
           echo "Deploying image $ECR_IMAGE:$IMAGE_TAG via SSM..."
 
-          # SSM command
           COMMAND_ID=$(aws ssm send-command \
             --targets "Key=tag:Name,Values=LegalSyncApp" \
             --document-name "AWS-RunShellScript" \
             --comment "Deploy LegalSync" \
             --parameters "commands=[
               \"cd /home/ec2-user/LegalSync\",
-              \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_IMAGE\",
+              \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com\",
               \"docker pull $ECR_IMAGE:$IMAGE_TAG\",
               \"docker tag $ECR_IMAGE:$IMAGE_TAG legalsync:current || true\",
-              \"DB_SECRET_JSON=\\\$(aws secretsmanager get-secret-value --secret-id prod/legalsync/postgres --query SecretString --output text)\",
-              \"export DATABASE_URL=\\\$(echo \\\$DB_SECRET_JSON | jq -r '.username + \":\" + .password + \"@\" + .host + \":\" + (.port|tostring) + \"/\" + .dbname')\",
+              \"/usr/local/bin/load-db-secret.sh\",
               \"docker compose up -d\"
             ]" \
             --region $AWS_REGION \
@@ -107,7 +104,7 @@ jobs:
 
           echo "Command ID: $COMMAND_ID"
 
-          # Wait for all instances to finish command
+          # Wait for command to complete
           for INSTANCE_ID in $(aws ec2 describe-instances \
               --filters "Name=tag:Name,Values=LegalSyncApp" \
               --query "Reservations[].Instances[].InstanceId" \
@@ -135,36 +132,18 @@ jobs:
             sleep 10
 
             # Health check
-            HEALTH_CMD_ID=$(aws ssm send-command \
+            HEALTH=$(aws ssm send-command \
               --targets "Key=instanceIds,Values=$INSTANCE_ID" \
               --document-name "AWS-RunShellScript" \
               --parameters "commands=[\"docker inspect --format '{{.State.Health.Status}}' legalsync 2>/dev/null || echo 'no-healthcheck'\"]" \
               --region $AWS_REGION \
               --query "Command.CommandId" \
-              --output text)
-
-            HEALTH_STATUS="Pending"
-            while [[ "$HEALTH_STATUS" == "Pending" || "$HEALTH_STATUS" == "InProgress" ]]; do
-              sleep 3
-              HEALTH_STATUS=$(aws ssm get-command-invocation \
-                --command-id $HEALTH_CMD_ID \
-                --instance-id $INSTANCE_ID \
-                --region $AWS_REGION \
-                --query "Status" \
-                --output text 2>/dev/null || echo "Pending")
-            done
-
-            HEALTH=$(aws ssm get-command-invocation \
-              --command-id $HEALTH_CMD_ID \
-              --instance-id $INSTANCE_ID \
-              --region $AWS_REGION \
-              --query "StandardOutputContent" \
-              --output text | tr -d '[:space:]')
+              --output text | xargs -I{} aws ssm get-command-invocation --command-id {} --instance-id $INSTANCE_ID --query "StandardOutputContent" --output text | tr -d '[:space:]')
 
             echo "Container health status: $HEALTH"
 
             if [[ "$HEALTH" != "healthy" && "$HEALTH" != "no-healthcheck" ]]; then
-              echo "Health check failed on $INSTANCE_ID, rolling back..."
+              echo "Health check failed on $INSTANCE_ID (status: $HEALTH), rolling back..."
               aws ssm send-command \
                 --targets "Key=instanceIds,Values=$INSTANCE_ID" \
                 --document-name "AWS-RunShellScript" \
