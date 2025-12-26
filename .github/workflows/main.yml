@@ -97,6 +97,8 @@ jobs:
               \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com\",
               \"docker pull $ECR_IMAGE:$IMAGE_TAG\",
               \"docker tag $ECR_IMAGE:$IMAGE_TAG legalsync:current || true\",
+              \"DB_SECRET_JSON=$(aws secretsmanager get-secret-value --secret-id prod/legalsync/postgres --query SecretString --output text)\",
+              \"export DATABASE_URL=$(echo $DB_SECRET_JSON | jq -r '"postgresql+psycopg2://\(.username):\(.password)@\(.host):\(.port)/\(.dbname)"')\",
               \"docker compose up -d\"
             ]" \
             --region $AWS_REGION \
