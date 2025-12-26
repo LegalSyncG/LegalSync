@@ -1,0 +1,30 @@
+version: "3.8"
+
+services:
+  legalsync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: legalsync
+    ports:
+      - "8080:8080"
+    working_dir: /app
+    environment:
+      ASR_BACKEND: whisper
+      WHISPER_CHUNKING: "true"
+      WHISPER_MODEL: small
+      WHISPER_DEVICE: cpu
+      ANCHOR_STEP: 10
+      ANCHOR_WINDOW: 4
+      ANCHOR_N_MAX: 5
+      ANCHOR_N_MIN: 2
+    volumes:
+      - .:/app
+      - ./frontend/public:/app/backend/static
+      - ./uploads:/app/backend/uploads
+    command: gunicorn -w 2 --reload -b 0.0.0.0:8080 backend.wsgi:app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      retries: 3
+      start_period: 5s
