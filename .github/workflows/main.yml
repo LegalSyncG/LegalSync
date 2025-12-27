@@ -78,7 +78,7 @@ jobs:
         id: compose
         run: |
           # Encode docker-compose.yml as base64 to safely pass it
-          COMPOSE_B64=$(base64 -w 0 "${{ github.action_path }}/docker-compose.yml")
+          COMPOSE_B64=$(base64 -w 0 "$GITHUB_WORKSPACE/docker-compose.yml")
           echo "compose_content=$COMPOSE_B64" >> $GITHUB_OUTPUT
   
       - name: Deploy via SSM
