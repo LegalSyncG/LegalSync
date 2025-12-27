@@ -875,6 +875,7 @@ def case_alignment(case_id: int):
     alignment_path = os.path.join(case_dir, "alignment.json")
     if not os.path.isfile(alignment_path):
         logger.info(f"Alignment doesnt exist in {alignment_path}")
+        return jsonify({"error": "alignment not found"}), 404
     with open(alignment_path, "r", encoding="utf-8") as f:
         payload = json.load(f)
 
