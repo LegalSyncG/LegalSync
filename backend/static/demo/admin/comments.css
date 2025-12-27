@@ -1,0 +1,750 @@
+    body {
+    font-family: sans-serif;
+    margin: 0;
+    padding: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  .main-content {
+    display: block; /* single scroll frame */
+    flex: 1;
+    margin-top: 0px; /* Wysokość nagłówka */
+    height: calc(100vh - 60px);
+  }
+
+.transcript-container {
+  position: relative;
+  height: 100%;
+  overflow: auto; /* single scroller */
+  padding: 12px 20px 20px; /* smaller top padding to reduce gap */
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+.search-container {
+  flex-shrink: 0;
+  margin: 0 0 12px 0;
+  display: flex;
+  gap: 8px;
+  position: static; /* becomes sticky only when searching */
+  margin-right: 360px; /* keep clear of right overlay */
+  background: transparent;
+  padding: 0 0 0 12px; /* slight left breathing room */
+}
+.search-container.sticky {
+  position: sticky;
+  top: 0;
+  z-index: 3000; /* visible over content, below header */
+  background: #ffffff;
+  padding: 10px 0 10px 12px; /* keep left padding */
+  border-bottom: 1px solid #e5e7eb;
+}
+/* Fixed fallback (overlays under the main header) */
+.search-container.fixed {
+  position: fixed;
+  top: 60px; /* will be overridden inline by JS using header height */
+  left: 0;   /* overridden inline */
+  width: auto; /* overridden inline */
+  z-index: 4000; /* above content, below notifications */
+  background: #ffffff;
+  padding: 10px 0 10px 12px; /* keep left padding */
+  border-bottom: 1px solid #e5e7eb;
+}
+.search-placeholder { height: 0; }
+
+#commentContainer {
+  flex: 1;
+  overflow: visible; /* scrolls via transcript-container */
+  min-height: 0;
+  margin-top: 10px;
+  padding-right: 360px; /* reserve space for overlay */
+}
+
+.comment-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 340px;
+  bottom: 0;
+  padding: 0 12px 12px 12px; /* no top padding to align coordinates */
+  background: #f7f7f7;
+  box-shadow: -1px 0 0 rgba(0,0,0,0.08);
+  overflow: visible; /* threads are positioned absolutely inside */
+  box-sizing: border-box;
+  z-index: 100; /* keep below header */
+}
+
+#selectedCommentSection {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  left: 12px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 10px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+  z-index: 2000; /* above threads and editors */
+  display: none; /* shown when selecting range */
+}
+
+.panel-content {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+#existingComments {
+  position: relative; /* anchor for absolute comment items */
+  min-height: 0;
+}
+
+.page-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 4px;
+  padding: 3px 10px;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #4b5fb2;
+  background: rgba(231, 236, 250, 0.6);
+  border-radius: 999px;
+  border-left: 3px solid #4b5fb2;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.page-label--inline {
+  margin: 10px 0 4px;
+  align-self: flex-start;
+}
+
+    .entry-box {
+      border-bottom: 1px solid #ddd;
+      margin-bottom: 15px;
+      padding-bottom: 14px; /* give room for play icon */
+      position: relative; /* anchor for play icon */
+    }
+
+    /* Small circular Play button */
+    .play-icon {
+      position: absolute;
+      right: 6px;
+      bottom: 6px;
+      width: 28px;
+      height: 28px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 9999px;
+      background: #ffffff;
+      color: #1d2b4f;
+      border: 1px solid #d0d7e2;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity 0.12s ease, transform 0.05s ease;
+      user-select: none;
+      font-size: 16px; /* keep triangle size */
+      font-weight: 700;
+    }
+    .play-icon:hover { background: #f6f8fc; }
+    .play-icon:active { transform: scale(0.98); }
+    .entry-box:hover .play-icon,
+    .entry-box:focus-within .play-icon { opacity: 1; }
+    .play-icon.playing { background: #eaf1ff; border-color: #b8c7ee; }
+
+    /* Two tiny circular nudge buttons revealed near Play (not in same box) */
+    .nudge-wrap {
+      position: absolute;
+      right: 36px; /* to the left of play */
+      bottom: 6px;
+      display: flex;
+      gap: 4px;
+      opacity: 0;
+      transform: translateX(6px);
+      pointer-events: none;
+      transition: opacity 0.12s ease, transform 0.12s ease;
+    }
+    .nudge-circle {
+      width: 20px;
+      height: 20px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 9999px;
+      background: #ffffff;
+      border: 1px solid #d0d7e2;
+      color: #1d2b4f;
+      box-shadow: 0 1px 6px rgba(0,0,0,0.06);
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 700;
+      user-select: none;
+    }
+    .nudge-circle:hover { background: #f6f8fc; }
+    /* Reveal when hovering/focusing the play button or the nudges themselves */
+    .entry-box .play-icon:hover ~ .nudge-wrap,
+    .entry-box .play-icon:focus ~ .nudge-wrap,
+    .entry-box .nudge-wrap:hover,
+    .entry-box .nudge-wrap:focus-within {
+      opacity: 1;
+      transform: translateX(0);
+      pointer-events: auto;
+    }
+
+    /* Playback tools (visible only when playing) */
+    /* (old play-tools removed) */
+
+    .word {
+      cursor: pointer;
+      padding: 1px 3px;
+      border-radius: 3px;
+      margin: 0 1px;
+      transition: background 0.2s;
+    }
+
+    .word.selected {
+      background-color: #ffccd5;
+    }
+
+    .word.commented {
+      position: relative;
+    }
+
+    .word.commented::after {
+      content: '';
+      position: absolute;
+      bottom: -2px;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background-color: #99ccff;
+    }
+
+    .word.commented:hover {
+      background-color: #cce5ff;
+    }
+
+    .comment-panel h2 {
+      margin-top: 0;
+    }
+
+    .comment-item {
+      background: #fff;
+      border: 1px solid #ddd;
+      margin-bottom: 10px;
+      padding: 10px 36px 10px 10px; /* leave space for kebab */
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.2s;
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .comment-item:hover {
+      background: #f0f8ff;
+      border-color: #99ccff;
+    }
+
+    .comment-item.active {
+      background: #e0f2ff;
+      border-left: 3px solid #1d2b4f;
+      z-index: 5; /* under header */
+    }
+
+    .comment-item p {
+      margin: 0 0 5px;
+    }
+    
+    .comment-item button {
+      margin-right: 5px;
+      padding: 3px 8px;
+      border: 1px solid #ccc;
+      border-radius: 3px;
+      background: white;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+
+    .comment-item button:hover {
+      background: #e0e0e0;
+    }
+
+    /* Kebab (more) icon and menu */
+    .comment-item .kebab {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      display: inline-flex; /* always visible */
+      align-items: center;
+      justify-content: center;
+      color: #444;
+      font-weight: bold;
+      user-select: none;
+    }
+    .comment-item.active .kebab { display: inline-flex; }
+    .comment-item .kebab:hover { background: #f0f0f0; }
+
+    .comment-item .menu {
+      position: absolute;
+      top: 32px;
+      right: 8px;
+      background: white;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      padding: 6px 0;
+      display: none;
+      z-index: 150; /* above item content but below header */
+      min-width: 140px;
+    }
+    .comment-item .menu.open { display: block; }
+    .comment-item .menu button {
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      border: none;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+    .comment-item .menu button:hover { background: #f5f5f5; }
+
+    .comment-body {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .comment-body p {
+      margin: 0;
+      line-height: 1.4;
+    }
+
+    .comment-label {
+      font-weight: 600;
+      color: #1d2b4f;
+      margin-right: 4px;
+    }
+
+    .comment-meta {
+      margin-top: 10px;
+      font-size: 0.78rem;
+      color: #4b5563;
+      line-height: 1.4;
+    }
+
+    .comment-meta__location {
+      font-weight: 500;
+    }
+
+    .comment-meta__time {
+      margin-top: 4px;
+      color: #1d2b4f;
+      font-weight: 600;
+    }
+
+    .comment-meta__time.is-muted {
+      color: #9ca3af;
+      font-weight: 500;
+    }
+
+    #editPanel {
+      display: none;
+      background: #f0f8ff;
+      padding: 15px;
+      margin-top: 15px;
+      border: 1px solid #99ccff;
+      border-radius: 8px;
+    }
+
+    .notification {
+      position: fixed;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: white;
+      padding: 1rem 2rem;
+      border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      z-index: 10000; /* above header and sticky search */
+      display: flex;
+      align-items: center;
+      max-width: 90%;
+      animation: fadeIn 0.3s, fadeOut 0.3s 2.7s;
+    }
+
+    .notification.error {
+      background: #ffebee;
+      border-left: 4px solid #f44336;
+    }
+
+    .notification.success {
+      background: #e8f5e9;
+      border-left: 4px solid #4caf50;
+    }
+
+    .confirmation-modal {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.5);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      z-index: 2000;
+    }
+
+    .confirmation-box {
+      background: #ffffff;
+      padding: 25px;
+      border-radius: 8px;
+      border-left: 4px solid #1d2b4f; /* theme accent */
+      max-width: 400px;
+      width: 90%;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+    }
+
+    .confirmation-buttons {
+      display: flex;
+      gap: 10px;
+      margin-top: 20px;
+    }
+
+    .confirmation-buttons button {
+      flex: 1;
+      padding: 10px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    .confirmation-buttons .confirm-btn {
+      background: #1d2b4f;
+      color: white;
+    }
+
+    .confirmation-buttons .confirm-btn:hover {
+      background: #3a4a6e;
+    }
+
+    .confirmation-buttons .cancel-btn {
+      background: #e0e0e0;
+    }
+
+    .confirmation-buttons .cancel-btn:hover {
+      background: #d0d0d0;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; top: 0; }
+      to { opacity: 1; top: 20px; }
+    }
+
+    @keyframes fadeOut {
+      from { opacity: 1; }
+      to { opacity: 0; }
+    }
+
+    textarea {
+      width: 100%;
+      resize: vertical;
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      margin-bottom: 10px;
+      font-family: inherit;
+      box-sizing: border-box;
+    }
+  
+    #commentForm button {
+      padding: 10px 16px;
+      background: #1d2b4f;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: 600;
+      transition: background 0.2s;
+      width: 100%;
+    }
+
+    #commentForm button:hover {
+      background: #3a4a6e;
+    }
+
+    /* New search highlight styles */
+    .word.search-match {
+      background-color: #fff3b0; /* soft yellow */
+    }
+.word.search-current {
+  background-color: #ffe066; /* stronger yellow */
+  outline: 2px solid #ffbf00;
+  outline-offset: 0;
+}
+
+/* Preserve original line structure inside each paragraph */
+.line-block {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.line-no {
+  flex: 0 0 auto;
+  width: 2.5em;
+  text-align: right;
+  color: #9ca3af; /* muted */
+  user-select: none;
+}
+.line-text {
+  flex: 1 1 auto;
+  white-space: normal;
+}
+
+    .search-container {
+      margin: 0 0 12px 0;
+      display: flex;
+      gap: 8px;
+      margin-right: 360px; /* keep clear of right overlay */
+    }
+
+    .search-container input {
+      flex: 1;
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+    }
+    /* limit default button styling to nav buttons only */
+    .nav-btn {
+      padding: 8px 16px;
+      background: #1d2b4f;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .search-controls { display: none; align-items: center; gap: 8px; }
+    .search-container.engaged .search-controls { display: inline-flex; }
+    .search-counter {
+      align-self: center;
+      min-width: 56px;
+      text-align: center;
+      font-weight: 600;
+      color: #1d2b4f;
+    }
+    .search-input-wrap {
+      position: relative;
+      flex: 1;
+      display: flex;
+      align-items: center;
+    }
+    .search-input-wrap input { width: 100%; padding-right: 28px; }
+    .search-input-wrap .clear-icon {
+      position: absolute;
+      right: 6px;
+      background: transparent;
+      color: #6b7280;
+      border: none;
+      width: 24px;
+      height: 24px;
+      border-radius: 12px;
+      cursor: pointer;
+      line-height: 24px;
+      text-align: center;
+      font-size: 18px;
+      padding: 0;
+    }
+    .search-input-wrap .clear-icon:hover { background: #f3f4f6; }
+
+    /* Navigation buttons and toggle styles */
+    .nav-btn {
+      padding: 8px 12px;
+      background: #1d2b4f;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .nav-btn:focus { outline: 2px solid #60a5fa; outline-offset: 2px; }
+
+    /* Sliding toggle switch */
+    .toggle-switch {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: transparent;
+      color: #0f172a;
+      border: none;
+      cursor: pointer;
+      padding: 6px 8px;
+      border-radius: 9999px;
+    }
+    .toggle-switch .switch-track {
+      position: relative;
+      width: 42px;
+      height: 22px;
+      background: #e5e7eb;
+      border-radius: 9999px;
+      transition: background 0.2s ease;
+      box-shadow: inset 0 0 0 1px #cbd5e1;
+    }
+    .toggle-switch .switch-thumb {
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 18px;
+      height: 18px;
+      background: #ffffff;
+      border-radius: 9999px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+      transition: transform 0.2s ease;
+    }
+    .toggle-switch[aria-pressed="true"] .switch-track { background: #1d2b4f; box-shadow: inset 0 0 0 1px #1d2b4f; }
+    .toggle-switch[aria-pressed="true"] .switch-thumb { transform: translateX(20px); }
+    .toggle-switch .switch-label { font-size: 0.9rem; color: #0f172a; }
+
+    /* Inline editor pinned to a comment item */
+    .inline-edit {
+      margin-top: 8px;
+      padding: 10px;
+      background: #f0f4ff;
+      border: 1px solid #dbe3ff;
+      border-left: 4px solid #1d2b4f;
+      border-radius: 6px;
+      position: relative;
+      z-index: 4; /* below header */
+    }
+
+    /* Hide kebab when editing this comment to reduce clutter */
+    .comment-item.editing .kebab { display: none; }
+
+    /* Ensure the right panel is below header */
+    .comment-panel { z-index: 100; }
+    .inline-edit textarea {
+      width: 100%;
+      resize: vertical;
+      padding: 8px;
+      border: 1px solid #cfd8ea;
+      border-radius: 4px;
+      margin-bottom: 8px;
+      box-sizing: border-box;
+      background: #fff;
+    }
+    .inline-edit .actions {
+      display: flex;
+      gap: 8px;
+    }
+    .inline-edit .actions button {
+      padding: 8px 12px;
+      border-radius: 4px;
+      border: none;
+      cursor: pointer;
+    }
+    .inline-edit .save {
+      background: #1d2b4f;
+      color: #fff;
+    }
+    .inline-edit .save:hover { background: #3a4a6e; }
+    .inline-edit .cancel { background: #e0e7ff; color: #1d2b4f; }
+
+    .panel-content {
+      flex: 1;
+      overflow: visible; /* will scroll via parent to sync with transcript */
+      min-height: 0;
+    }
+
+    /* unified highlight over continuous words incl. spaces (only when selected/active) */
+    .word.selectedRange,
+    .word.comment-highlight {
+      background-color: #ffccd5;
+      margin: 0 1px;
+      padding: 1px 3px;
+      border-radius: 3px;
+      box-shadow: inset 0 0 0 1px #dbe3ff;
+    }
+    .word.selectedRange::after,
+    .word.comment-highlight::after {
+      content: none;
+    }
+
+    .comments-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 15px;
+    }
+
+    .comment-panel h2 {
+      margin-top: 0;
+      padding-top: 10px;
+    }
+
+    .search-container { gap: 8px; }
+    .search-container.sticky { position: sticky; top: 0; background: #fff; padding: 10px 0; z-index: 3000; border-bottom: 1px solid #e5e7eb; }
+
+    .admin-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 2rem;
+    background-color: #1d2b4f;
+    color: white;
+    width: 100%;
+    position: sticky;
+    top: 0;
+    left: 0;
+    z-index: 5000; /* ensure header above comments */
+    height: 60px;
+    box-sizing: border-box;
+    }
+    .admin-header .header-actions { display: flex; align-items: center; gap: 10px; }
+    .admin-header .kebab-btn { color: #ffffff; }
+    .admin-header .kebab-btn:hover { background: rgba(255,255,255,0.12); }
+
+    .admin-header h1 {
+      color: white;
+      margin: 0;
+      font-size: 1.8rem;
+    }
+    #commentContainer button,
+    .back-btn {
+      background-color: #f8fafc;
+      color: #1d2b4f;
+      border: none;
+      padding: 0.5rem 1.5rem;
+      border-radius: 30px;
+      cursor: pointer;
+      font-weight: 600;
+      transition: all 0.3s ease;
+      text-decoration: none;
+      font-size: 0.9rem;
+    }
+
+    .back-btn:hover {
+      background-color: #e1e7f0;
+    }
+    /* Responsywność - na mniejszych ekranach */
+@media (max-width: 768px) {
+  .main-content {
+    flex-direction: column;
+  }
+  
+  .transcript-container {
+    border-right: none;
+    border-bottom: 1px solid #ccc;
+  }
+}

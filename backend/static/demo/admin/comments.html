@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Edit Transcript Comments</title>
+  <link rel="stylesheet" href="admin.css" />
+  <link rel="stylesheet" href="comments.css" />
+</head>
+<body>
+  <div class="admin-header">
+    <h1>LegalSync</h1>
+    <div class="header-actions">
+      <a href="dashboard.html" class="back-btn">Back to Dashboard</a>
+      <div class="item-actions">
+        <button id="commentsMenuBtn" class="kebab-btn" aria-haspopup="true" aria-expanded="false" aria-label="More actions">⋮</button>
+        <div id="commentsActionMenu" class="action-menu" role="menu">
+          <button id="downloadExternalBtn" class="menu-item" role="menuitem">Download external comments</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="main-content">
+  <div class="transcript-container">
+  <div class="search-container" aria-label="Transcript search bar">
+    <div class="search-input-wrap">
+      <input type="text" id="searchTranscript" placeholder="Search in transcript..." aria-label="Search query" autocomplete="off">
+      <button type="button" id="clearSearchIcon" class="clear-icon" aria-label="Clear search">×</button>
+    </div>
+    <div class="search-controls">
+      <button type="button" id="searchPrev" class="nav-btn" aria-label="Previous result">Prev</button>
+      <button type="button" id="searchNext" class="nav-btn" aria-label="Next result">Next</button>
+      <span id="searchCounter" class="search-counter" role="status" aria-live="polite" aria-atomic="true">0/0</span>
+      <button type="button" id="searchModeToggle" class="toggle-switch" aria-pressed="false" aria-label="Toggle: search in comments">
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+        <span class="switch-label">Search in comments</span>
+      </button>
+    </div>
+  </div>
+  <div id="commentContainer">Loading...</div>
+
+    <div class="comment-panel">
+      <div id="selectedCommentSection">
+        <div class="comments-header">
+          <h2>Selected Comment</h2>
+        </div>
+        
+        <form id="commentForm">
+          <textarea id="internalComment" rows="2" placeholder="Internal comment (for your team)"></textarea>
+          <textarea id="externalComment" rows="2" placeholder="External comment (for the other party)"></textarea>
+          <div style="display:flex; gap:8px;">
+            <button type="submit">Add Comment</button>
+            <button type="button" id="cancelSelectBtn">Cancel</button>
+          </div>
+        </form>
+        
+        <div id="editPanel">
+          <h3>Edit Comment</h3>
+          <textarea id="editInternal" rows="2" placeholder="Internal comment..."></textarea>
+          <textarea id="editExternal" rows="2" placeholder="External comment..."></textarea>
+          <div style="display: flex; gap: 10px; margin-top: 10px;">
+            <button id="saveEditBtn">Save</button>
+            <button id="cancelEditBtn">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <div id="existingComments"></div>
+    </div>
+  </div>
+  </div>
+
+  <!-- Hidden audio element used to play paragraph snippets (no UI shown) -->
+  <audio id="paragraphAudio" style="position:absolute; left:-9999px; width:0; height:0; opacity:0;"></audio>
+
+  <script type="module" src="comments.js"></script>
+</body>
+</html>
