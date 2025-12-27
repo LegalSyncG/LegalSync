@@ -66,7 +66,6 @@ jobs:
           docker build -t $IMAGE_URI:$IMAGE_TAG .
           docker push $IMAGE_URI:$IMAGE_TAG
           echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
-
   deploy:
     name: Deploy via SSM
     runs-on: ubuntu-latest
@@ -91,7 +90,7 @@ jobs:
             --document-name "AWS-RunShellScript" \
             --comment "Deploy LegalSync" \
             --parameters "commands=[
-              \"cd /home/ec2-user/LegalSync\",
+              \"cd /opt/legalsync\",
               \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com\",
               \"docker pull $ECR_IMAGE:$IMAGE_TAG\",
               \"docker tag $ECR_IMAGE:$IMAGE_TAG legalsync:current || true\",
@@ -148,7 +147,7 @@ jobs:
                 --targets "Key=instanceIds,Values=$INSTANCE_ID" \
                 --document-name "AWS-RunShellScript" \
                 --parameters "commands=[
-                  \"cd /home/ec2-user/LegalSync\",
+                  \"cd /opt/legalsync\",
                   \"source /usr/local/bin/load-db-secret.sh\",
                   \"docker compose up -d legalsync\"
                 ]" \
@@ -158,3 +157,4 @@ jobs:
 
             echo "Deployment successful on $INSTANCE_ID"
           done
+
