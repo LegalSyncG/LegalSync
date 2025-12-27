@@ -3,6 +3,7 @@ flask
 flask_sqlalchemy
 Flask-JWT-Extended
 flask-cors
+flask-migrate
 requests
 faster-whisper
 python-docx

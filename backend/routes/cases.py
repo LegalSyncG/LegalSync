@@ -25,6 +25,7 @@ from backend.services.alignment import (
 from backend.services.whisper_asr import transcribe_with_whisper
 from backend.services.pdf_extract import extract_pdf_text_and_metadata
 from xml.etree import ElementTree
+from backend.logger import logger
 
 
 cases_bp = Blueprint("cases", __name__)
@@ -614,6 +615,7 @@ def _align_job(user_id: int, case_id: int, gentle_url: str) -> None:
 
         # Choose backend: Whisper (local) or Gentle (HTTP)
         backend = os.getenv("ASR_BACKEND", "gentle").lower()
+        logger.info(f"Alignment job for case {case_id} using backend: {backend}")
         if backend == "whisper":
             _write_status(case_dir, "aligning")
             use_chunking = (os.getenv("WHISPER_CHUNKING", "false").lower() in {"1","true","yes"})
@@ -627,7 +629,7 @@ def _align_job(user_id: int, case_id: int, gentle_url: str) -> None:
                         write_json(path, data)
                     except Exception:
                         pass
-                from services.whisper_asr import transcribe_with_whisper_chunked
+                from backend.services.whisper_asr import transcribe_with_whisper_chunked
                 result = transcribe_with_whisper_chunked(
                     wav_path=wav_path,
                     work_dir=chunks_dir,
@@ -712,6 +714,7 @@ def _align_job(user_id: int, case_id: int, gentle_url: str) -> None:
 @cases_bp.route("/cases", methods=["POST"])
 @jwt_required()
 def create_case():
+    logger.info("Received request to create new case")
     user_id = _get_user_id()
     # Accept: multipart with fields: name, audio (mp3), transcript (txt) or transcript_text (str)
     name = request.form.get("name") or "New Case"
@@ -811,6 +814,7 @@ def create_case():
 
     # Background alignment
     gentle_url = os.getenv("GENTLE_URL", "http://localhost:8765")
+    logger.info(f"Starting background alignment job for case {new_case.id}")
     t = threading.Thread(target=_align_job, args=(user_id, new_case.id, gentle_url), daemon=True)
     t.start()
 
@@ -870,7 +874,7 @@ def case_alignment(case_id: int):
     case_dir = _case_dir(user_id, case_id)
     alignment_path = os.path.join(case_dir, "alignment.json")
     if not os.path.isfile(alignment_path):
-        return jsonify({"error": "alignment not ready"}), 404
+        logger.info(f"Alignment doesnt exist in {alignment_path}")
     with open(alignment_path, "r", encoding="utf-8") as f:
         payload = json.load(f)
 
@@ -889,6 +893,7 @@ def case_alignment(case_id: int):
 
     if need_refresh:
         transcript_txt = os.path.join(case_dir, "transcript.txt")
+        logger.info(f"Transcript text path for remapping: {transcript_txt}")
         if os.path.isfile(transcript_txt):
             try:
                 with open(transcript_txt, "r", encoding="utf-8", errors="ignore") as tf:
@@ -914,6 +919,7 @@ def case_transcript_raw(case_id: int):
     case_dir = _case_dir(user_id, case_id)
     transcript_txt = os.path.join(case_dir, "transcript.txt")
     if not os.path.isfile(transcript_txt):
+        logger.error(f"Transcript text file not found: {transcript_txt}")
         return jsonify({"error": "transcript not found"}), 404
     with open(transcript_txt, "r", encoding="utf-8", errors="ignore") as f:
         return jsonify({"text": f.read()})

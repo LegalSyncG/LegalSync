@@ -8,6 +8,7 @@ import os
 import re
 
 from backend.routes.files import FileType, register_file, create_case
+from backend.logger import logger 
 
 
 def is_valid_email(email):
@@ -30,17 +31,21 @@ def signup():
     from backend.database.models import User
 
     if User.query.filter_by(username=username).first():
+        logger.error(f"Attempted signup with existing username: {username}")
         return jsonify({"error": "Username already exists"}), 400
 
     if len(username) > 80:
+        logger.error(f"Attempted signup with too long username: {username}")
         return jsonify({"error": "Username is too long"}), 400
 
     user = User(username=username)
     email = data.get('email')
     if email:
         if not is_valid_email(email):
+            logger.error(f"Attempted signup with invalid email: {email}")
             return jsonify({"error": "Invalid email"}), 400
         user.email = email
+    logger.info(f"Creating new user: {username}")
     user.set_password(password)
     db.session.add(user)
     db.session.commit()
@@ -57,6 +62,7 @@ def signup():
                 create_case(user.id, cases[i], i)
             except Exception:
                 # Non-fatal: if creating sample case fails during tests, continue
+                logger.error(f"Failed to create sample case {cases[i]} for user {username}")
                 pass
     except Exception:
         pass
@@ -76,5 +82,7 @@ def login():
         token = create_access_token(
             identity=json.dumps({"id": user.id, "username": user.username}),
             expires_delta=timedelta(days=1))
+        logger.info(f"User logged in: {username}")
         return jsonify({"token": token}), 200  # Login successful
+    logger.error(f"Failed login attempt for username: {username}")
     return jsonify({"error": "Invalid credentials"}), 401  # Unauthorized
