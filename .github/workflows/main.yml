@@ -95,7 +95,7 @@ jobs:
               \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com\",
               \"docker pull $ECR_IMAGE:$IMAGE_TAG\",
               \"docker tag $ECR_IMAGE:$IMAGE_TAG legalsync:current || true\",
-              \"/usr/local/bin/load-db-secret.sh\",
+              \"source /usr/local/bin/load-db-secret.sh\",
               \"docker compose up -d\"
             ]" \
             --region $AWS_REGION \
@@ -149,6 +149,7 @@ jobs:
                 --document-name "AWS-RunShellScript" \
                 --parameters "commands=[
                   \"cd /home/ec2-user/LegalSync\",
+                  \"source /usr/local/bin/load-db-secret.sh\",
                   \"docker compose up -d legalsync\"
                 ]" \
                 --region $AWS_REGION
