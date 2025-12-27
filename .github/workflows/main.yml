@@ -74,6 +74,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
   
+      - name: Read docker-compose.yml and encode
+        id: compose
+        run: |
+          # Encode docker-compose.yml as base64 to safely pass it
+          COMPOSE_B64=$(base64 -w 0 "${{ github.action_path }}/docker-compose.yml")
+          echo "compose_content=$COMPOSE_B64" >> $GITHUB_OUTPUT
+  
       - name: Deploy via SSM
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -81,12 +88,10 @@ jobs:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
           IMAGE_TAG: ${{ needs.build-and-push.outputs.IMAGE_TAG }}
+          COMPOSE_CONTENT: ${{ steps.compose.outputs.compose_content }}
         run: |
           ECR_IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/legalsync"
           echo "Deploying image $ECR_IMAGE:$IMAGE_TAG via SSM..."
-  
-          # Read docker-compose.yml into a variable and escape quotes/newlines
-          COMPOSE_CONTENT=$(sed 's/"/\\"/g' docker-compose.yml | awk '{printf "%s\\n", $0}')
   
           COMMAND_ID=$(aws ssm send-command \
             --targets "Key=tag:Name,Values=LegalSyncApp" \
@@ -94,7 +99,7 @@ jobs:
             --comment "Deploy LegalSync" \
             --parameters "commands=[
               \"mkdir -p /opt/legalsync\",
-              \"echo '$COMPOSE_CONTENT' > /opt/legalsync/docker-compose.yml\",
+              \"echo '$COMPOSE_CONTENT' | base64 -d > /opt/legalsync/docker-compose.yml\",
               \"cd /opt/legalsync\",
               \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com\",
               \"docker pull $ECR_IMAGE:$IMAGE_TAG\",
@@ -162,8 +167,4 @@ jobs:
   
             echo "Deployment successful on $INSTANCE_ID"
           done
-  
-  
-              echo "Deployment successful on $INSTANCE_ID"
-            done
 
