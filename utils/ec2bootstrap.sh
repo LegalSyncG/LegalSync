@@ -1,69 +1,84 @@
+#!/bin/bash
+set -euo pipefail
+
 echo "Starting EC2 bootstrap script..."
-echo "Switching to root user..."
-sudo -i
 
 echo "Installing Docker Engine on Amazon Linux 2023..."
 
-sudo dnf update -y
+dnf update -y
 # Remove old version if installed
-sudo dnf remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine
+dnf remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine
 
 # Install dnf plugin
-sudo dnf -y install dnf-plugins-core
+dnf -y install dnf-plugins-core
 
 # Add CentOS repository
-sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
 
-# Adjust release server version in the path as it will not match with Amazon Linux 2023
-# so we'll hard code it to Alamlinux 9/Centos 9
-sudo sed -i 's/$releasever/9/g' /etc/yum.repos.d/docker-ce.repo
+# Adjust release server version for Amazon Linux 2023
+sed -i 's/$releasever/9/g' /etc/yum.repos.d/docker-ce.repo
 
-# Install as usual
-sudo dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+# Install Docker
+dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-# Enable the docker service
-sudo systemctl enable --now docker
-
-echo "Installing needed packages"
+# Start Docker (use service directly if systemctl fails)
+if command -v systemctl &>/dev/null; then
+    systemctl enable --now docker || true
+else
+    service docker start || true
+fi
 
 echo "Installing needed packages..."
-sudo dnf install -y certbot python3-certbot-nginx
-sudo dnf install -y git nginx
+dnf install -y certbot python3-certbot-nginx git nginx jq
 
-echo "Importing needed files"
+echo "Importing LegalSync files from S3..."
+mkdir -p /opt/legalsync
+aws s3 cp s3://bootstrapfiles-legalsync-ec2/LegalSync /opt/legalsync --recursive
 
-#LegalSync directory
+echo "Importing Let's Encrypt files..."
+mkdir -p /etc/letsencrypt
+aws s3 cp s3://bootstrapfiles-legalsync-ec2/letsencrypt /etc/letsencrypt --recursive
+chown -R root:root /etc/letsencrypt
+chmod -R 600 /etc/letsencrypt
+chmod 700 /etc/letsencrypt/{live,archive,accounts,renewal}
 
-sudo mkdir -p /home/ec2-user
-sudo chown ec2-user:ec2-user /home/ec2-user
-sudo chmod 755 /home/ec2-user
-sudo aws s3 cp \
-  s3://bootstrapfiles-legalsync-ec2/LegalSync \
-  /home/ec2-user/LegalSync \
-  --recursive
-sudo chown -R ec2-user:ec2-user /home/ec2-user/LegalSync
+echo "Importing Nginx configuration..."
+aws s3 cp s3://bootstrapfiles-legalsync-ec2/nginx /etc/nginx --recursive
 
+sudo nginx 
+# Reload Nginx
+if command -v systemctl &>/dev/null; then
+    systemctl reload nginx || true
+else
+    nginx -s reload || true
+fi
 
-#LetsEncrypt directory 
-sudo mkdir -p /etc/letsencrypt
-sudo aws s3 cp \
-  s3://bootstrapfiles-legalsync-ec2/letsencrypt \
-  /etc/letsencrypt \
-  --recursive
-sudo chown -R root:root /etc/letsencrypt
-sudo chmod -R 600 /etc/letsencrypt
-sudo chmod 700 /etc/letsencrypt
-sudo chmod 700 /etc/letsencrypt/{live,archive,accounts,renewal}
+echo "Creating load-db-secret.sh..."
+cat > /usr/local/bin/load-db-secret.sh << 'EOF'
+#!/bin/bash
+set -euo pipefail
 
+SECRET_NAME="prod/legalsync/postgres"
+REGION="eu-central-1"
 
-#Nginx configuration
-sudo aws s3 cp \
-  s3://bootstrapfiles-legalsync-ec2/nginx \
-  /etc/nginx \
-  --recursive
+SECRET_JSON=$(aws secretsmanager get-secret-value \
+  --region "$REGION" \
+  --secret-id "$SECRET_NAME" \
+  --query SecretString \
+  --output text)
 
+DB_USER=$(jq -r .username <<< "$SECRET_JSON")
+DB_PASS=$(jq -r .password <<< "$SECRET_JSON")
+DB_HOST=$(jq -r .host <<< "$SECRET_JSON")
+DB_PORT=$(jq -r .port <<< "$SECRET_JSON")
+DB_NAME=$(jq -r .dbname <<< "$SECRET_JSON")
 
-echo "Reloading Nginx to apply new configuration..."
-sudo systemctl reload nginx
+export DATABASE_URL="postgresql+psycopg2://${DB_USER}:${DB_PASS}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
 
+echo "DATABASE_URL exported successfully"
+EOF
 
+chmod +x /usr/local/bin/load-db-secret.sh
+chown root:root /usr/local/bin/load-db-secret.sh
+
+echo "Bootstrap finished."
