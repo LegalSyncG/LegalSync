@@ -1,4 +1,12 @@
 import os
+import logging 
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(filename)s:%(lineno)d | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
 
 class Config:
@@ -10,11 +18,13 @@ class Config:
     DATABASE_URL = os.getenv("DATABASE_URL")
 
     if DATABASE_URL:
+        logging.info("Using DATABASE_URL from environment") 
         SQLALCHEMY_DATABASE_URI = DATABASE_URL.replace(
             "postgres://", "postgresql+psycopg2://", 1
         )
     else:
         # Fallback for local dev
+        logging.info("Using local SQLite database for development")
         SQLALCHEMY_DATABASE_URI = "sqlite:///legalsync.db"
 
     # Uploads
