@@ -78,7 +78,7 @@ jobs:
         id: compose
         run: |
           # Encode docker-compose.yml as base64 to safely pass it
-          COMPOSE_B64=$(base64 -w 0 "$GITHUB_WORKSPACE/docker-compose.yml")
+          COMPOSE_B64=$(base64 -w 0 "$GITHUB_WORKSPACE/docker-compose.yaml")
           echo "compose_content=$COMPOSE_B64" >> $GITHUB_OUTPUT
   
       - name: Deploy via SSM
@@ -99,7 +99,7 @@ jobs:
             --comment "Deploy LegalSync" \
             --parameters "commands=[
               \"mkdir -p /opt/legalsync\",
-              \"echo '$COMPOSE_CONTENT' | base64 -d > /opt/legalsync/docker-compose.yml\",
+              \"echo '$COMPOSE_CONTENT' | base64 -d > /opt/legalsync/docker-compose.yaml\",
               \"cd /opt/legalsync\",
               \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com\",
               \"docker pull $ECR_IMAGE:$IMAGE_TAG\",
