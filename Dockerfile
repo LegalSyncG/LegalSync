@@ -12,14 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Kod backendu
-COPY backend/ .
-
-# Pliki frontu (ważne!)
-COPY frontend/public /app/static
-
-# Pliki demo/uploads (dla assetów audio/tekstu)
-COPY uploads /app/uploads
+COPY backend ./backend
+COPY uploads ./uploads
 
 # Port i start
 ENV PORT=8080

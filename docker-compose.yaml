@@ -17,10 +17,10 @@ services:
       ANCHOR_N_MAX: 5
       ANCHOR_N_MIN: 2
       DATABASE_URL: ${DATABASE_URL}
+      FLASK_ENV: production
     volumes:
-      - .:/app
-      - ./frontend/public:/app/backend/static
-      - ./uploads:/app/backend/uploads
+      - ./backend:/app/backend  
+      - ./uploads:/app/uploads
     command: gunicorn -w 2 --reload -b 0.0.0.0:8080 backend.wsgi:app
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
