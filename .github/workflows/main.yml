@@ -109,6 +109,7 @@ jobs:
               \"aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com\",
               \"docker pull $ECR_IMAGE:$IMAGE_TAG\",
               \"docker tag $ECR_IMAGE:$IMAGE_TAG legalsync:current || true\",
+              \"source /usr/local/bin/cleanup.sh\",
               \"source /usr/local/bin/load-db-secret.sh\",
               \"docker compose up -d\"
             ]" \
