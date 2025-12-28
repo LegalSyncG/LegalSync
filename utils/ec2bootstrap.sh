@@ -81,4 +81,45 @@ EOF
 chmod +x /usr/local/bin/load-db-secret.sh
 chown root:root /usr/local/bin/load-db-secret.sh
 
+echo "Creating cleanup.sh..."
+cat > /usr/local/bin/cleanup.sh << 'EOF'
+#!/bin/bash
+set -e
+
+# CONFIG
+KEEP_IMAGES=2
+LOG_FILE="/var/log/docker-cleanup.log"
+
+echo "----------------------------------------" >> $LOG_FILE
+echo "$(date) - Starting Docker cleanup" >> $LOG_FILE
+
+echo "Removing stopped containers..." >> $LOG_FILE
+docker container prune -f >> $LOG_FILE 2>&1
+
+echo "Removing dangling images..." >> $LOG_FILE
+docker image prune -f >> $LOG_FILE 2>&1
+
+echo "Removing old images (keeping last $KEEP_IMAGES)..." >> $LOG_FILE
+
+docker images --format "{{.Repository}} {{.ID}} {{.CreatedAt}}" \
+| sort -k1,1 -k3,3r \
+| awk -v keep=$KEEP_IMAGES '
+{
+  repo=$1
+  image=$2
+  if (repo != last_repo) {
+    count=0
+    last_repo=repo
+  }
+  count++
+  if (count > keep && repo != "<none>") {
+    print image
+  }
+}' \
+| xargs -r docker rmi -f >> $LOG_FILE 2>&1
+
+
+echo "$(date) - Docker cleanup finished" >> $LOG_FILE
+EOF
+
 echo "Bootstrap finished."
