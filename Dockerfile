@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend ./backend
 COPY uploads ./uploads
+COPY migrations ./migrations
 
 # Port i start
 ENV PORT=8080
