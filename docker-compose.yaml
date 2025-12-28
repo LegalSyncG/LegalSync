@@ -19,7 +19,6 @@ services:
       DATABASE_URL: ${DATABASE_URL}
       FLASK_ENV: production
     volumes:
-      - ./backend:/app/backend  
       - ./uploads:/app/uploads
     command: gunicorn -w 2 --reload -b 0.0.0.0:8080 backend.wsgi:app
     healthcheck:
