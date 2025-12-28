@@ -22,7 +22,8 @@ services:
       - ./uploads:/app/uploads
     command: gunicorn -w 2 --reload -b 0.0.0.0:8080 backend.wsgi:app
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
       interval: 10s
-      retries: 3
-      start_period: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
