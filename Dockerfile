@@ -15,8 +15,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend ./backend
 COPY uploads ./uploads
 COPY migrations ./migrations
+COPY entrypoint.sh /entrypoint.sh
 
-# Port i start
-ENV PORT=8080
+RUN chmod +x /entrypoint.sh
+
+# Flask CLI needs this
+ENV FLASK_APP=backend.app
+
 EXPOSE 8080
-CMD ["gunicorn","-w","2","-b","0.0.0.0:8080","--access-logfile","-","--error-logfile","-","wsgi:app"]
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["gunicorn", "-w", "2", "-b", "0.0.0.0:8080", "backend.wsgi:app"]
