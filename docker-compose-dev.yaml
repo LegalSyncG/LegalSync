@@ -19,6 +19,7 @@ services:
       ANCHOR_N_MAX: 5
       ANCHOR_N_MIN: 2
     volumes:
+      - ./:/app
       - ./uploads:/app/uploads
     command: gunicorn -w 2 --reload -b 0.0.0.0:8080 backend.wsgi:app
     healthcheck:
