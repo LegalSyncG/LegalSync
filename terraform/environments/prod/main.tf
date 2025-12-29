@@ -6,6 +6,11 @@ locals {
   }
 }
 
+resource "random_password" "postgres" {
+  length  = 24
+  special = true
+}
+
 module "iam" {
   source = "../../modules/iam"
   name   = "legalsync"
@@ -64,7 +69,7 @@ module "rds" {
   security_groups = [module.security_groups.rds_sg_id]
   instance_class  = var.db_instance_class
   db_username     = var.db_username
-  db_password     = var.db_password
+  db_password     = random_password.postgres.result
   tags            = local.tags
 }
 
@@ -73,6 +78,13 @@ module "postgres_secret" {
 
   name        = "prod/legalsync/postgres"
   description = "Access for PostgreSQL DB for prod env for LegalSync App"
+
+  db_username     = module.rds.username
+  db_password     = random_password.postgres.result
+  db_host         = module.rds.endpoint
+  db_port         = module.rds.port
+  db_name         = module.rds.db_name
+  db_instance_id  = module.rds.rds_id
 
   tags = local.tags
 }
