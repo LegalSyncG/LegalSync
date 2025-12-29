@@ -45,13 +45,28 @@ chmod 700 /etc/letsencrypt/{live,archive,accounts,renewal}
 echo "Importing Nginx configuration..."
 aws s3 cp s3://bootstrapfiles-legalsync-ec2/nginx /etc/nginx --recursive
 
-sudo nginx 
-# Reload Nginx
+# Stop any existing Nginx
 if command -v systemctl &>/dev/null; then
-    systemctl reload nginx || true
+    systemctl stop nginx || true
 else
-    nginx -s reload || true
+    pkill nginx || true
 fi
+
+# Ensure ports 80/443 are free
+for PORT in 80 443; do
+    if lsof -i :$PORT; then
+        echo "Port $PORT is in use, killing process..."
+        fuser -k $PORT/tcp || true
+    fi
+done
+
+# Start Nginx
+if command -v systemctl &>/dev/null; then
+    systemctl enable nginx --now || true
+else
+    nginx || true
+fi
+
 
 echo "Creating load-db-secret.sh..."
 cat > /usr/local/bin/load-db-secret.sh << 'EOF'
@@ -121,5 +136,8 @@ docker images --format "{{.Repository}} {{.ID}} {{.CreatedAt}}" \
 
 echo "$(date) - Docker cleanup finished" >> $LOG_FILE
 EOF
+
+chmod +x /usr/local/bin/load-db-secret.sh
+chown root:root /usr/local/bin/load-db-secret.sh
 
 echo "Bootstrap finished."
